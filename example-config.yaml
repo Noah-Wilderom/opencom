@@ -1,0 +1,10 @@
+
+user:
+  name: "{{ .userName }}"
+
+encryption: 
+  keyPath: ~/.config/opencom/priv.key
+  type: sha256 # end-to-end
+
+friends:
+  path: ~/.config/opencom/friends.json
