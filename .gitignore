@@ -3,5 +3,8 @@
 
 .DS_Store
 
+.claude/
+docs/
+
 # Added by goreleaser init:
 dist/
