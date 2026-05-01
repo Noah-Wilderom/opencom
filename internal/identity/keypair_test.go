@@ -53,6 +53,9 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 }
 
 func TestSave_FileMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "priv.key")
@@ -66,6 +69,9 @@ func TestSave_FileMode0600(t *testing.T) {
 }
 
 func TestSave_CreatesParentDirWithMode0700(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
 	t.Parallel()
 
 	root := t.TempDir()

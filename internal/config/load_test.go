@@ -4,12 +4,24 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"opencom/internal/config"
 )
+
+// skipIfWindowsNoPosixModes skips a test that asserts on POSIX file
+// permission bits. Windows does not honor unix permission bits — files
+// always come back with broad mode like 0o666 / 0o777 — so these tests
+// only make sense on unix.
+func skipIfWindowsNoPosixModes(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
+}
 
 func TestLoad_MissingFileReturnsDefaultAndNotExist(t *testing.T) {
 	t.Parallel()
@@ -60,6 +72,7 @@ func TestLoad_UnknownKeyReturnsError(t *testing.T) {
 }
 
 func TestSave_CreatesParentDirsWithMode0700(t *testing.T) {
+	skipIfWindowsNoPosixModes(t)
 	t.Parallel()
 
 	root := t.TempDir()
@@ -73,6 +86,7 @@ func TestSave_CreatesParentDirsWithMode0700(t *testing.T) {
 }
 
 func TestSave_FileMode0600(t *testing.T) {
+	skipIfWindowsNoPosixModes(t)
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.yaml")

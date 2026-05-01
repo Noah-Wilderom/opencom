@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -219,6 +220,9 @@ func TestStore_PersistsAcrossReopen(t *testing.T) {
 }
 
 func TestStore_FileMode0600OnWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "friends.json")

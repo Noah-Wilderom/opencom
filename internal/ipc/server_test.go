@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -16,11 +17,24 @@ import (
 	"opencom/internal/ipc"
 )
 
+// skipIfWindowsNoUnixSockets skips a test that hits raw AF_UNIX
+// sockets directly. Windows production code uses Microsoft/go-winio
+// named pipes (see transport_windows.go), so these tests aren't
+// validating Windows production behavior — they exercise the
+// Unix-only test fixture.
+func skipIfWindowsNoUnixSockets(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses named pipes via go-winio; skipping unix-socket test fixture")
+	}
+}
+
 // startServer spins up an ipc.Server on a Unix socket inside t.TempDir() and
 // returns the socket path. The server is shut down when the test context is
 // canceled.
 func startServer(t *testing.T, ctx context.Context, register func(s *ipc.Server)) string {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 	sock := filepath.Join(t.TempDir(), "test.sock")
 	ln, err := net.Listen("unix", sock)
 	assert.NoError(t, err)
@@ -327,6 +341,7 @@ func TestServer_ConnDoneFiresOnClientDisconnect(t *testing.T) {
 }
 
 func TestServer_ContextCancellationStopsServe(t *testing.T) {
+	skipIfWindowsNoUnixSockets(t)
 	t.Parallel()
 
 	sock := filepath.Join(t.TempDir(), "test.sock")

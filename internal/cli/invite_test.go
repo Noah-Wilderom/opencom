@@ -38,6 +38,7 @@ const samplePeerIDStr = "12D3KooWG69gneTuz2eVG5QhgPeLay7W2iciaFpJ3L7vzk5jgmTi"
 // CLI's flag parsing + output formatting against a known response.
 func startInviteServer(t *testing.T, handlers map[string]ipc.Handler) func() {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 	root := os.Getenv("XDG_RUNTIME_DIR")
 	assert.NoError(t, os.MkdirAll(root, 0o700))
 	sock := filepath.Join(root, "opencom.sock")

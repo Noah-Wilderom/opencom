@@ -58,6 +58,7 @@ func newCallsRig(t *testing.T, ctx context.Context) *callsTestRig {
 
 func startCallsServer(t *testing.T, ctx context.Context, register func(s *ipc.Server)) string {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 	sock := filepath.Join(t.TempDir(), "test.sock")
 	ln, err := net.Listen("unix", sock)
 	assert.NoError(t, err)

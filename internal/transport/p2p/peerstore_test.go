@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,9 @@ import (
 )
 
 func TestSavePeerstore_WritesKnownAddrs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())

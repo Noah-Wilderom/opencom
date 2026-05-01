@@ -129,9 +129,22 @@ func (c *Client) readLoop(scanner *bufio.Scanner) {
 			if err := json.Unmarshal(msg.Params, &ev); err != nil {
 				continue
 			}
+			// Hold subsMu for the entire lookup-and-send so Subscription.Close
+			// can't race-close ch between us reading it from the map and
+			// sending on it. The send is non-blocking (select/default) so
+			// holding the lock briefly cannot deadlock — even if the
+			// subscriber has stopped reading, the default branch fires
+			// immediately and we release the lock.
 			c.subsMu.Lock()
-			ch, ok := c.subs[ev.Sub]
-			if !ok {
+			if ch, ok := c.subs[ev.Sub]; ok {
+				select {
+				case ch <- &ev:
+				default:
+					// Drop on overflow rather than block the read loop.
+					// TODO(M4): consider per-subscription overflow policy for
+					// streams that need lossless delivery (e.g. chat, transfers).
+				}
+			} else {
 				// Subscribe response and emitted events race on the wire;
 				// stash the event so a Subscribe call still in flight can
 				// drain it once it registers. Bounded by maxPendingEventsPerSub
@@ -140,17 +153,8 @@ func (c *Client) readLoop(scanner *bufio.Scanner) {
 				if c.pendEvs != nil && len(c.pendEvs[ev.Sub]) < maxPendingEventsPerSub {
 					c.pendEvs[ev.Sub] = append(c.pendEvs[ev.Sub], &ev)
 				}
-				c.subsMu.Unlock()
-				continue
 			}
 			c.subsMu.Unlock()
-			select {
-			case ch <- &ev:
-			default:
-				// Drop on overflow rather than block the read loop.
-				// TODO(M4): consider per-subscription overflow policy for
-				// streams that need lossless delivery (e.g. chat, transfers).
-			}
 		}
 	}
 	c.mu.Lock()

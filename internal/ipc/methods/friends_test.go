@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -16,6 +17,16 @@ import (
 	"opencom/internal/ipc"
 	"opencom/internal/ipc/methods"
 )
+
+// skipIfWindowsNoUnixSockets — Windows production code uses
+// go-winio named pipes; tests that bind raw AF_UNIX paths exercise
+// only the test fixture, not Windows production behavior.
+func skipIfWindowsNoUnixSockets(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses named pipes via go-winio; skipping unix-socket test fixture")
+	}
+}
 
 func writeFriendKey(t *testing.T, dir, name string) (string, identity.Keypair) {
 	t.Helper()
@@ -234,6 +245,7 @@ func TestFriendsSubscribePresence_DeliversEvents(t *testing.T) {
 // canceled.
 func startMethodsServer(t *testing.T, ctx context.Context, register func(s *ipc.Server)) string {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 	sock := filepath.Join(t.TempDir(), "test.sock")
 	ln, err := net.Listen("unix", sock)
 	assert.NoError(t, err)

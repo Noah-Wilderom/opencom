@@ -49,6 +49,7 @@ func startCallsServerForCLI(
 	store *friends.Store,
 ) (rigA *call.Engine, mgrA *call.Manager, peerB string, cleanup func()) {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 
 	root := os.Getenv("XDG_RUNTIME_DIR")
 	assert.NoError(t, os.MkdirAll(root, 0o700))

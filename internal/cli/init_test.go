@@ -35,6 +35,7 @@ func withTempPaths(t *testing.T) (root string) {
 // up?" pass.
 func startDaemonStub(t *testing.T) {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 	root := os.Getenv("XDG_RUNTIME_DIR")
 	assert.NoError(t, os.MkdirAll(root, 0o700))
 	sock := filepath.Join(root, "opencom.sock")

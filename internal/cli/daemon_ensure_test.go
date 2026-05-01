@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -13,7 +14,20 @@ import (
 	"opencom/internal/cli"
 )
 
+// skipIfWindowsNoUnixSockets — Windows production code uses named
+// pipes via go-winio; tests that bind raw AF_UNIX paths under
+// C:\Users\... fail with "bind: invalid argument" on Windows runners
+// because the test fixture isn't validating Windows production
+// behavior anyway. Skip on Windows.
+func skipIfWindowsNoUnixSockets(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses named pipes via go-winio; skipping unix-socket test fixture")
+	}
+}
+
 func TestEnsureDaemonRunning_NoOpWhenAlreadyListening(t *testing.T) {
+	skipIfWindowsNoUnixSockets(t)
 	withTempPaths(t)
 
 	// Start a stub listener at the daemon's socket path so EnsureDaemonRunning

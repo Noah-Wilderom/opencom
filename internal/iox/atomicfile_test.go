@@ -3,6 +3,7 @@ package iox_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,7 +11,15 @@ import (
 	"opencom/internal/iox"
 )
 
+func skipIfWindowsNoPosixModes(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
+}
+
 func TestAtomicWriteFile_WritesContentWithMode(t *testing.T) {
+	skipIfWindowsNoPosixModes(t)
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "out.bin")
@@ -26,6 +35,7 @@ func TestAtomicWriteFile_WritesContentWithMode(t *testing.T) {
 }
 
 func TestAtomicWriteFile_CreatesParentsWithDirMode(t *testing.T) {
+	skipIfWindowsNoPosixModes(t)
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "deep", "nested", "out.bin")

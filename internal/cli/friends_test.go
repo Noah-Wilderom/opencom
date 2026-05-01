@@ -21,6 +21,7 @@ import (
 
 func startFriendsServer(t *testing.T, store *friends.Store, presence *friends.Presence) func() {
 	t.Helper()
+	skipIfWindowsNoUnixSockets(t)
 	root := os.Getenv("XDG_RUNTIME_DIR")
 	assert.NoError(t, os.MkdirAll(root, 0o700))
 	sock := filepath.Join(root, "opencom.sock")

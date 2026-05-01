@@ -3,6 +3,7 @@ package identity_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -80,6 +81,9 @@ func TestPubKey_ReturnsUsableKey(t *testing.T) {
 }
 
 func TestWriteExport_FileMode0644(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
 	t.Parallel()
 
 	kp, err := identity.Generate()

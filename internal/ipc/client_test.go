@@ -70,6 +70,7 @@ func TestClient_CallReturnsErrorFromHandler(t *testing.T) {
 }
 
 func TestClient_DialFailsOnVersionMismatch(t *testing.T) {
+	skipIfWindowsNoUnixSockets(t)
 	t.Parallel()
 
 	sock := filepath.Join(t.TempDir(), "test.sock")
