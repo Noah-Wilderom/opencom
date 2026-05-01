@@ -1,0 +1,17 @@
+# Terraform state — contains secrets, IPs, regenerated per-environment.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Per-deployment values — contains API tokens.
+terraform.tfvars
+*.auto.tfvars
+
+# Crash logs.
+crash.log
+crash.*.log
+
+# Plan files.
+*.tfplan

@@ -84,8 +84,29 @@ func Run(ctx context.Context, opts Options) error {
 		relays = parseAddrInfoList(opts.Config.Relay.Peers, opts.Log, "relay.peers")
 	}
 
+	// Stable listen port for relay/bootstrap nodes: when network.listen_port
+	// is non-zero, bind explicitly on TCP+QUIC, IPv4+IPv6 instead of the
+	// ephemeral default. Required for public nodes whose multiaddr is
+	// referenced from other peers' config.
+	var listenAddrs []ma.Multiaddr
+	if port := opts.Config.Network.ListenPort; port > 0 {
+		for _, s := range []string{
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port),
+			fmt.Sprintf("/ip6/::/tcp/%d", port),
+			fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", port),
+			fmt.Sprintf("/ip6/::/udp/%d/quic-v1", port),
+		} {
+			m, err := ma.NewMultiaddr(s)
+			if err != nil {
+				return fmt.Errorf("parsing listen addr %q: %w", s, err)
+			}
+			listenAddrs = append(listenAddrs, m)
+		}
+	}
+
 	host, err := p2p.New(ctx, p2p.HostOptions{
 		PrivKey:        opts.Identity.Priv,
+		ListenAddrs:    listenAddrs,
 		BootstrapPeers: bootstraps,
 		RelayPeers:     relays,
 	})

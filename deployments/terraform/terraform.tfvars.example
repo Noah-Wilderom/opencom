@@ -1,0 +1,22 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is in .gitignore — never commit secrets.
+
+# --- Required ----------------------------------------------------------------
+
+hcloud_token         = "REPLACE_WITH_HETZNER_API_TOKEN"
+cloudflare_api_token = "REPLACE_WITH_CLOUDFLARE_API_TOKEN"
+cloudflare_zone      = "example.com"
+admin_ssh_public_key = "ssh-ed25519 AAAA... your-key user@host"
+
+# --- Optional overrides ------------------------------------------------------
+
+# server_name        = "opencom-relay"
+# server_type        = "cx22"      # or "cax11" for ARM
+# server_location    = "fsn1"      # fsn1, hel1, nbg1, ash, hil, sin
+# admin_user         = "admin"
+# ssh_port           = 22
+# dns_record_name    = "opencom"   # → opencom.example.com
+# opencom_repo       = "Noah-Wilderom/opencom"
+# opencom_version    = "latest"    # or "v0.1.0"
+# opencom_binary_url = ""          # overrides repo+version when set
+# opencom_listen_port = 4001
