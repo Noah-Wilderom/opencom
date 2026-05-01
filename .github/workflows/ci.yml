@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+      - name: go test -race (selected packages)
+        run: go test -race ./internal/discovery/... ./internal/call/... ./internal/ipc/... ./internal/app/... ./internal/cli/... ./internal/transport/p2p/...
+      - name: cross-compile windows
+        run: GOOS=windows go build ./...
+      - name: cross-compile darwin
+        run: GOOS=darwin go build ./...
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...

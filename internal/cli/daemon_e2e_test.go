@@ -418,3 +418,48 @@ func TestE2E_CallAcrossSimulatedNetworks(t *testing.T) {
 	}, nil))
 	expectState(t, sub, "ended", 5*time.Second)
 }
+
+func TestE2E_InviteFlow(t *testing.T) {
+	bootstrapInfo, cleanupBoot := startDHTBootstrap(t)
+	defer cleanupBoot()
+
+	sockA, _, cleanupA := startRealDaemonWithBootstrap(t, []peer.AddrInfo{bootstrapInfo})
+	defer cleanupA()
+	sockB, _, cleanupB := startRealDaemonWithBootstrap(t, []peer.AddrInfo{bootstrapInfo})
+	defer cleanupB()
+
+	cA, err := ipc.Dial(context.Background(), sockA)
+	assert.NoError(t, err)
+	defer cA.Close()
+	cB, err := ipc.Dial(context.Background(), sockB)
+	assert.NoError(t, err)
+	defer cB.Close()
+
+	// Wait briefly for the publishers to settle.
+	time.Sleep(2 * time.Second)
+
+	// A creates an invite.
+	var createResp methods.InviteCreateResult
+	assert.NoError(t, cA.Call(context.Background(), "invite.create",
+		methods.InviteCreateParams{}, &createResp))
+	assert.NotEmpty(t, createResp.Code)
+
+	// B redeems.
+	var redeemResp methods.InviteRedeemResult
+	err = cB.Call(context.Background(), "invite.redeem",
+		methods.InviteRedeemParams{Code: createResp.Code}, &redeemResp)
+	assert.NoError(t, err)
+
+	// Both daemons' friends.list should now show one friend.
+	var listA, listB methods.FriendsListResult
+	assert.NoError(t, cA.Call(context.Background(), "friends.list", nil, &listA))
+	assert.NoError(t, cB.Call(context.Background(), "friends.list", nil, &listB))
+	assert.Len(t, listA.Friends, 1)
+	assert.Len(t, listB.Friends, 1)
+
+	// A's invite.list should show the code as consumed.
+	var inviteList methods.InviteListResult
+	assert.NoError(t, cA.Call(context.Background(), "invite.list", nil, &inviteList))
+	assert.Len(t, inviteList.Invites, 1)
+	assert.True(t, inviteList.Invites[0].Consumed)
+}

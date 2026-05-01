@@ -7,9 +7,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
+	kardianosservice "github.com/kardianos/service"
 	"github.com/spf13/cobra"
 
 	"opencom/internal/app"
@@ -33,17 +33,23 @@ func newDaemonCmd() *cobra.Command {
 
 func newDaemonStartCmd() *cobra.Command {
 	var foreground bool
+	var background bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the opencom daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !foreground {
-				return errors.New("background daemonization is not implemented yet; run with --foreground (managed start arrives in M8)")
+			if foreground && background {
+				return errors.New("--foreground and --background are mutually exclusive")
+			}
+			if !foreground && !background {
+				// Default: foreground, preserving M2 contract.
+				foreground = true
 			}
 			return runDaemonStart(cmd)
 		},
 	}
-	cmd.Flags().BoolVar(&foreground, "foreground", false, "run the daemon in the foreground (required in M2)")
+	cmd.Flags().BoolVar(&foreground, "foreground", false, "run the daemon in the foreground (blocks until interrupted)")
+	cmd.Flags().BoolVar(&background, "background", false, "marker flag used by auto-spawn; the actual detachment happens in the spawning parent")
 	return cmd
 }
 
@@ -77,7 +83,7 @@ func runDaemonStart(cmd *cobra.Command) error {
 	log := openlog.New(cfg.Daemon.LogLevel, io.MultiWriter(logFile, cmd.ErrOrStderr()))
 	defer func() { _ = log.Sync() }()
 
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 	defer stop()
 
 	// Snapshot build info into Options so the global cli.Version is read once.
@@ -104,6 +110,18 @@ func newDaemonStopCmd() *cobra.Command {
 func runDaemonStop(cmd *cobra.Command) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 	defer cancel()
+
+	// If the service is installed and running, warn the user that the
+	// service manager may auto-restart the daemon after we ask it to
+	// stop. To stop without restart, the user should `opencom service stop`.
+	if svc, _, svcErr := buildService(); svcErr == nil {
+		if st, _ := svc.Status(); st == kardianosservice.StatusRunning {
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"warning: opencom is installed as a service; the service manager may auto-restart the daemon.")
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"         To stop without restart, use `opencom service stop`.")
+		}
+	}
 
 	client, err := dialDaemon(ctx)
 	if err != nil {
@@ -164,11 +182,23 @@ func runDaemonStatus(cmd *cobra.Command) error {
 	return nil
 }
 
-// dialDaemon is a small helper used by Tasks 7 and 8.
+// dialDaemon dials the daemon's IPC path. Does NOT auto-spawn — callers
+// (like `daemon status` and `daemon stop`) that should report honestly
+// when no daemon is running use this directly.
 func dialDaemon(ctx context.Context) (*ipc.Client, error) {
 	paths, err := config.DefaultPaths()
 	if err != nil {
 		return nil, err
 	}
 	return ipc.Dial(ctx, paths.SocketPath)
+}
+
+// dialDaemonOrStart ensures the daemon is running (auto-spawning if
+// needed), then dials it. Used by user-facing commands that should
+// "just work" when the daemon isn't already running.
+func dialDaemonOrStart(ctx context.Context) (*ipc.Client, error) {
+	if err := EnsureDaemonRunning(ctx); err != nil {
+		return nil, fmt.Errorf("ensuring daemon is running: %w", err)
+	}
+	return dialDaemon(ctx)
 }

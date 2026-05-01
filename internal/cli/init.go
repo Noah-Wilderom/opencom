@@ -1,38 +1,48 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"opencom/internal/config"
 	"opencom/internal/identity"
 	"opencom/internal/iox"
+	"opencom/internal/ipc/methods"
 )
 
 func newInitCmd() *cobra.Command {
 	var (
-		name     string
-		noPrompt bool
+		name        string
+		noPrompt    bool
+		withService bool
 	)
 	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Initialise the local opencom config and identity",
+		Use:   "init [<name>]",
+		Short: "Initialise opencom: identity, daemon, and a fresh invite code",
 		Long: `Creates ~/.config/opencom (or the OS equivalent), generates an
-Ed25519 libp2p keypair, writes a default config.yaml, and creates an empty
-friends list. Safe to run multiple times — existing files are not touched.`,
+Ed25519 libp2p keypair, writes a default config.yaml, creates an empty
+friends list, auto-starts the daemon, and prints a fresh invite code.
+Safe to run multiple times — existing files are reused.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInit(cmd, name, noPrompt)
+			if len(args) == 1 && name == "" {
+				name = args[0]
+			}
+			return runInit(cmd, name, noPrompt, withService)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "display name for your identity")
-	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "reserved; non-interactive is the default in M1")
+	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "reserved; non-interactive is the default")
+	cmd.Flags().BoolVar(&withService, "service", false, "also run `opencom service install`")
 	return cmd
 }
 
-func runInit(cmd *cobra.Command, name string, noPrompt bool) error {
+func runInit(cmd *cobra.Command, name string, noPrompt bool, withService bool) error {
 	paths, err := config.DefaultPaths()
 	if err != nil {
 		return fmt.Errorf("resolving paths: %w", err)
@@ -48,26 +58,64 @@ func runInit(cmd *cobra.Command, name string, noPrompt bool) error {
 	if err != nil {
 		return err
 	}
-
 	cfg, err := ensureConfig(paths.ConfigFile, name)
 	if err != nil {
 		return err
 	}
-
 	if err := ensureFriendsFile(paths.FriendsFile); err != nil {
 		return err
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "✓ Created config at %s\n", paths.ConfigDir)
-	fmt.Fprintf(out, "✓ Identity:    %s\n", kp.PeerID.String())
-	fmt.Fprintf(out, "✓ Display:     %s\n", cfg.User.Name)
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Next steps:")
-	fmt.Fprintf(out, "  opencom identity export ./me.pub.key   # share with friends\n")
-	fmt.Fprintf(out, "  opencom daemon start --foreground       # start the libp2p daemon\n")
-	fmt.Fprintf(out, "  opencom friends add ./alice.pub.key    # import a friend's pubkey\n")
-	_ = noPrompt // reserved for future interactive prompting
+	fmt.Fprintf(out, "✓ Identity:   %s (display: %s)\n", kp.PeerID.String(), cfg.User.Name)
+
+	// Auto-spawn the daemon if not running.
+	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+	defer cancel()
+	if err := EnsureDaemonRunning(ctx); err != nil {
+		fmt.Fprintf(out, "✗ Daemon failed to start: %v\n", err)
+		fmt.Fprintln(out, "  Run `opencom daemon start --foreground` for diagnostics.")
+		return err
+	}
+	fmt.Fprintln(out, "✓ Daemon:     running")
+
+	// Optional service install.
+	if withService {
+		svc, _, svcErr := buildService()
+		if svcErr != nil {
+			fmt.Fprintf(out, "✗ Service support unavailable: %v\n", svcErr)
+		} else {
+			if installErr := svc.Install(); installErr == nil || isAlreadyInstalled(installErr) {
+				fmt.Fprintln(out, "✓ Service:    installed (will start at next login)")
+			} else {
+				fmt.Fprintf(out, "✗ Service install failed: %v\n", installErr)
+			}
+		}
+	}
+
+	// Generate a fresh invite via IPC.
+	c, err := dialDaemon(ctx)
+	if err != nil {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Daemon is running but couldn't connect for invite generation.")
+		fmt.Fprintln(out, "Try `opencom invite` manually.")
+		return nil
+	}
+	defer c.Close()
+	var resp methods.InviteCreateResult
+	if err := c.Call(ctx, "invite.create", methods.InviteCreateParams{}, &resp); err != nil {
+		fmt.Fprintf(out, "✗ Could not generate invite: %v\n", err)
+		return nil
+	}
+	fmt.Fprintln(out, "")
+	fmt.Fprintf(out, "  Invite code: %s (valid 30 min)\n", resp.Code)
+	fmt.Fprintln(out, "")
+	fmt.Fprintf(out, "  Share this code with a friend. They run:\n    opencom add %s\n", resp.Code)
+	if !withService {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "  Tip: run `opencom service install` to keep the daemon running across reboots.")
+	}
+	_ = noPrompt
 	return nil
 }
 

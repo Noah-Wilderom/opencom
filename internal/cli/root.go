@@ -30,6 +30,10 @@ and require no operator-controlled infrastructure.`,
 	root.AddCommand(newDaemonCmd())
 	root.AddCommand(newFriendsCmd())
 	root.AddCommand(newCallCmd())
+	root.AddCommand(newServiceCmd())
+	root.AddCommand(newInviteCmd())
+	root.AddCommand(newAddCmd())
+	root.AddCommand(newStatusCmd())
 
 	return root
 }

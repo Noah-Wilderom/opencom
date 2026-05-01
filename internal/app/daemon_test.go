@@ -84,19 +84,22 @@ func TestRun_ListensAndAcceptsConnections(t *testing.T) {
 	}
 }
 
-func TestRun_FailsWhenPIDFileHeld(t *testing.T) {
+func TestRun_FailsWhenIPCPathHeld(t *testing.T) {
 	opts := makeOptions(t)
 
-	pidPath := opts.Paths.SocketPath + ".pid"
-	release, err := app.AcquirePIDFile(pidPath)
+	// Hold the IPC path with a real listener so app.Run cannot bind it.
+	// The new single-instance contract is "ipc.Listen succeeds → we are
+	// the only daemon" — no separate file lock.
+	assert.NoError(t, os.MkdirAll(filepath.Dir(opts.Paths.SocketPath), 0o700))
+	ln, err := ipc.Listen(opts.Paths.SocketPath)
 	assert.NoError(t, err)
-	defer release()
+	defer ln.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	err = app.Run(ctx, opts)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "already running")
+	assert.Contains(t, err.Error(), "listening")
 }
 
 func TestRun_RemovesStaleSocketBeforeListening(t *testing.T) {
@@ -151,33 +154,6 @@ func TestRun_SocketModeIs0600(t *testing.T) {
 
 	cancel()
 	<-done
-}
-
-func TestRun_CleansUpPIDFileOnReturn(t *testing.T) {
-	opts := makeOptions(t)
-	pidPath := opts.Paths.SocketPath + ".pid"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- app.Run(ctx, opts) }()
-
-	// Wait for pid file to appear, then cancel and wait for return.
-	appeared := false
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(pidPath); err == nil {
-			appeared = true
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	assert.True(t, appeared, "pid file should appear within 2s")
-
-	cancel()
-	<-done
-
-	_, err := os.Stat(pidPath)
-	assert.True(t, os.IsNotExist(err), "pid file should be removed after Run returns")
 }
 
 func TestRun_CreatesSocketParentDir(t *testing.T) {

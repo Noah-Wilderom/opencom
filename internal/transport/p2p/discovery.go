@@ -62,6 +62,15 @@ var _ DHT = (*dht.IpfsDHT)(nil)
 // publicBootstrapAddrs is the standard libp2p / IPFS bootstrap set. These
 // nodes are operated by Protocol Labs and have multi-year uptime; the
 // daemon falls back to them when no caller-provided bootstraps exist.
+//
+// CAVEAT: opencom now runs its own DHT mesh under the protocol prefix
+// /opencom/kad/1.0.0 (see host.go). The IPFS bootstrap nodes speak
+// /ipfs/kad/1.0.0, so they will NOT be added to the opencom DHT routing
+// table — they are useful only as libp2p connection seeds (peerstore
+// hints). Production deployments that need cross-network discovery must
+// supply opencom-specific bootstrap peers via HostOptions.BootstrapPeers.
+// LAN-only setups can rely on mDNS instead. (See M8 spec: configurable
+// bootstrap list.)
 var publicBootstrapAddrs = []string{
 	"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
 	"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",

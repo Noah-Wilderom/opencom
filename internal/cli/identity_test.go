@@ -15,6 +15,7 @@ import (
 
 func runInitForTest(t *testing.T, name string) {
 	t.Helper()
+	startDaemonStub(t)
 	root := cli.NewRootCmd()
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})

@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,8 +27,34 @@ func withTempPaths(t *testing.T) (root string) {
 	return root
 }
 
+// startDaemonStub creates a Unix-socket listener at the daemon's socket
+// path so EnsureDaemonRunning's PathReachable check returns true,
+// preventing the auto-spawn from trying to fork the test binary. The
+// stub does not speak the IPC protocol — IPC dials will fail their
+// hello handshake — but the code paths that only need "is the daemon
+// up?" pass.
+func startDaemonStub(t *testing.T) {
+	t.Helper()
+	root := os.Getenv("XDG_RUNTIME_DIR")
+	assert.NoError(t, os.MkdirAll(root, 0o700))
+	sock := filepath.Join(root, "opencom.sock")
+	ln, err := net.Listen("unix", sock)
+	assert.NoError(t, err)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+}
+
 func TestInit_CreatesAllExpectedFiles(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root := cli.NewRootCmd()
 	var out bytes.Buffer
@@ -47,6 +74,7 @@ func TestInit_CreatesAllExpectedFiles(t *testing.T) {
 
 func TestInit_PrivateKeyMode0600(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root := cli.NewRootCmd()
 	var out bytes.Buffer
@@ -64,6 +92,7 @@ func TestInit_PrivateKeyMode0600(t *testing.T) {
 
 func TestInit_StoresDisplayName(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root := cli.NewRootCmd()
 	var out bytes.Buffer
@@ -81,6 +110,7 @@ func TestInit_StoresDisplayName(t *testing.T) {
 
 func TestInit_PrintsPeerID(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root := cli.NewRootCmd()
 	var out bytes.Buffer
@@ -98,6 +128,7 @@ func TestInit_PrintsPeerID(t *testing.T) {
 
 func TestInit_FriendsFileIsEmptyJSONArray(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root := cli.NewRootCmd()
 	var out bytes.Buffer
@@ -115,6 +146,7 @@ func TestInit_FriendsFileIsEmptyJSONArray(t *testing.T) {
 
 func TestInit_IdempotentDoesNotOverwriteExistingKey(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root1 := cli.NewRootCmd()
 	root1.SetArgs([]string{"init", "--name=Alice", "--no-prompt"})
@@ -140,6 +172,7 @@ func TestInit_IdempotentDoesNotOverwriteExistingKey(t *testing.T) {
 
 func TestInit_IdempotentDoesNotOverwriteName(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root1 := cli.NewRootCmd()
 	root1.SetArgs([]string{"init", "--name=Alice", "--no-prompt"})
@@ -162,6 +195,7 @@ func TestInit_IdempotentDoesNotOverwriteName(t *testing.T) {
 
 func TestInit_ConfigFileMode0600(t *testing.T) {
 	withTempPaths(t)
+	startDaemonStub(t)
 
 	root := cli.NewRootCmd()
 	var out bytes.Buffer

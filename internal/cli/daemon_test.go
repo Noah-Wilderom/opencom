@@ -19,18 +19,18 @@ import (
 	"opencom/internal/ipc/methods"
 )
 
-func TestDaemonStart_RequiresForegroundFlag(t *testing.T) {
+func TestDaemonStart_ForegroundAndBackgroundAreMutuallyExclusive(t *testing.T) {
 	withTempPaths(t)
 
 	root := cli.NewRootCmd()
 	var out, errBuf bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&errBuf)
-	root.SetArgs([]string{"daemon", "start"})
+	root.SetArgs([]string{"daemon", "start", "--foreground", "--background"})
 
 	err := root.Execute()
 	assert.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "foreground")
+	assert.Contains(t, strings.ToLower(err.Error()), "mutually exclusive")
 }
 
 func TestDaemonStart_ForegroundErrorsWithoutInit(t *testing.T) {

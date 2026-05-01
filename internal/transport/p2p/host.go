@@ -8,6 +8,7 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p-record"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -113,7 +114,28 @@ func New(ctx context.Context, opts HostOptions) (*Host, error) {
 		// race-free relative to subsequent ddht usage below.
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
 			var rerr error
-			ddht, rerr = dht.New(ctx, h, dht.Mode(opts.DHTMode), dht.BootstrapPeers(bootstraps...))
+			ddht, rerr = dht.New(ctx, h,
+				dht.Mode(opts.DHTMode),
+				dht.BootstrapPeers(bootstraps...),
+				// Use our own protocol prefix so we run a separate DHT
+				// mesh from the public IPFS DHT. The default /ipfs prefix
+				// enforces validators = exactly {pk, ipns}, which blocks
+				// us from registering opencom-discovery / opencom-invite
+				// validators. Our records have no business living on the
+				// public IPFS DHT anyway.
+				dht.ProtocolPrefix("/opencom"),
+				// Custom record validators for opencom-managed namespaces.
+				// We do AEAD + ed25519 signature verification ourselves at
+				// the discovery/invite layer; the DHT's per-namespace
+				// validator just needs to accept records under our prefixes.
+				// "pk" is preserved (libp2p uses it internally for
+				// peer-id-to-pubkey lookups).
+				dht.Validator(record.NamespacedValidator{
+					"pk":                record.PublicKeyValidator{},
+					"opencom-discovery": opencomValidator{},
+					"opencom-invite":    opencomValidator{},
+				}),
+			)
 			return ddht, rerr
 		}),
 	}
@@ -291,3 +313,17 @@ func (n *filteredNotifiee) Disconnected(net network.Network, c network.Conn) {
 		n.offline(id)
 	}
 }
+
+// opencomValidator is the libp2p record validator for the
+// /opencom-discovery/v1/... and /opencom-invite/v1/... DHT namespaces.
+//
+// We accept any record under these prefixes — the discovery and invite
+// layers do their own AEAD + ed25519 signature verification on top, so
+// the DHT validator's job is only to opt these namespaces in to the
+// PutValue/GetValue path. (Without this, libp2p-kad-dht's default
+// NamespacedValidator rejects records under unknown namespaces with
+// "invalid record keytype".)
+type opencomValidator struct{}
+
+func (opencomValidator) Validate(_ string, _ []byte) error                 { return nil }
+func (opencomValidator) Select(_ string, _ [][]byte) (int, error)          { return 0, nil }

@@ -17,20 +17,22 @@ type Paths struct {
 	PrivateKey  string
 	FriendsFile string
 	SocketPath  string
-	Peerstore   string
-	LogFile     string
-	PeerCache   string
+	Peerstore     string
+	LogFile       string
+	PeerCache     string
+	ActiveInvites string
 }
 
 const (
-	dirName        = "opencom"
-	configFileName = "config.yaml"
-	keyFileName    = "priv.key"
-	friendsName    = "friends.json"
-	peerstoreName  = "peerstore"
-	logFileName    = "daemon.log"
-	socketFileName = "opencom.sock"
-	peerCacheName  = "peer-cache.json"
+	dirName           = "opencom"
+	configFileName    = "config.yaml"
+	keyFileName       = "priv.key"
+	friendsName       = "friends.json"
+	peerstoreName     = "peerstore"
+	logFileName       = "daemon.log"
+	socketFileName    = "opencom.sock"
+	peerCacheName     = "peer-cache.json"
+	activeInvitesName = "active-invites.json"
 )
 
 // DefaultPaths populates Paths using OS conventions. Errors only when the
@@ -68,7 +70,8 @@ func DefaultPaths() (Paths, error) {
 		SocketPath:  socketPath,
 		Peerstore:   filepath.Join(stateDir, peerstoreName),
 		LogFile:     filepath.Join(stateDir, logFileName),
-		PeerCache:   filepath.Join(stateDir, peerCacheName),
+		PeerCache:     filepath.Join(stateDir, peerCacheName),
+		ActiveInvites: filepath.Join(stateDir, activeInvitesName),
 	}, nil
 }
 

@@ -33,7 +33,7 @@ func newCallCmd() *cobra.Command {
 }
 
 func runCallStart(cmd *cobra.Command, target string) error {
-	c, err := dialDaemon(cmd.Context())
+	c, err := dialDaemonOrStart(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("connecting to daemon: %w", err)
 	}
@@ -107,7 +107,7 @@ func newCallListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
-			c, err := dialDaemon(ctx)
+			c, err := dialDaemonOrStart(ctx)
 			if err != nil {
 				return fmt.Errorf("connecting to daemon: %w", err)
 			}
@@ -139,7 +139,7 @@ func newCallAcceptCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
-			c, err := dialDaemon(ctx)
+			c, err := dialDaemonOrStart(ctx)
 			if err != nil {
 				return fmt.Errorf("connecting to daemon: %w", err)
 			}
@@ -163,7 +163,7 @@ func newCallHangupCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
-			c, err := dialDaemon(ctx)
+			c, err := dialDaemonOrStart(ctx)
 			if err != nil {
 				return fmt.Errorf("connecting to daemon: %w", err)
 			}

@@ -38,14 +38,14 @@ type Client struct {
 // grow pendEvs without bound. Matches the registered-channel buffer cap.
 const maxPendingEventsPerSub = 16
 
-// Dial connects to the Unix socket at path and performs the protocol
-// handshake. Errors if the server's hello version does not match
-// ProtocolVersion.
+// Dial connects to the IPC endpoint at path and performs the protocol
+// handshake. The transport is platform-correct (Unix-domain socket on
+// Linux/macOS; Windows named pipe on Windows). Errors if the server's
+// hello version does not match ProtocolVersion.
 func Dial(ctx context.Context, path string) (*Client, error) {
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", path)
+	conn, err := dialTransport(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("dialing %s: %w", path, err)
+		return nil, err
 	}
 
 	c := &Client{

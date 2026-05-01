@@ -1,12 +1,8 @@
-//go:build unix
-
 package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 
@@ -17,27 +13,23 @@ import (
 	"opencom/internal/call"
 	"opencom/internal/discovery"
 	"opencom/internal/friends"
+	"opencom/internal/invite"
 	"opencom/internal/ipc"
 	"opencom/internal/ipc/methods"
 	"opencom/internal/transport/p2p"
 )
 
-// Run starts the daemon: PID file, libp2p host, friends + presence,
-// IPC socket, JSON-RPC server. Runs until ctx is canceled or the
-// daemon.shutdown method is invoked. Resources are cleaned up on return.
+// Run starts the daemon: libp2p host, friends + presence, IPC socket,
+// JSON-RPC server. Runs until ctx is canceled or the daemon.shutdown
+// method is invoked. Resources are cleaned up on return. Single-instance
+// is enforced by ipc.Listen failing if the IPC path is already in use —
+// no separate file lock is needed.
 func Run(ctx context.Context, opts Options) error {
 	if dir := filepath.Dir(opts.Paths.SocketPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating socket parent dir %s: %w", dir, err)
 		}
 	}
-
-	pidPath := opts.Paths.SocketPath + ".pid"
-	release, err := AcquirePIDFile(pidPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = release() }()
 
 	store, err := friends.Open(opts.Paths.FriendsFile)
 	if err != nil {
@@ -50,12 +42,26 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("opening peer cache: %w", err)
 	}
 
+	inviteStore, err := invite.OpenStore(opts.Paths.ActiveInvites)
+	if err != nil {
+		return fmt.Errorf("opening invite store: %w", err)
+	}
+
 	host, err := p2p.New(ctx, p2p.HostOptions{
 		PrivKey:        opts.Identity.Priv,
 		BootstrapPeers: opts.HostBootstraps,
 	})
 	if err != nil {
 		return fmt.Errorf("constructing libp2p host: %w", err)
+	}
+	// Warn loudly when no opencom-protocol bootstrap peers are configured:
+	// the daemon will only reach peers on the same LAN via mDNS until
+	// HostOptions.BootstrapPeers is populated with opencom nodes. See
+	// internal/transport/p2p/discovery.go for the bootstrap discussion.
+	if len(opts.HostBootstraps) == 0 {
+		opts.Log.Warn("no opencom bootstrap peers configured; cross-network discovery " +
+			"will not work until HostOptions.BootstrapPeers is populated " +
+			"(LAN-only via mDNS until then)")
 	}
 	defer host.Close()
 
@@ -113,6 +119,22 @@ func Run(ctx context.Context, opts Options) error {
 	callEngine.Start()
 	defer callEngine.Stop()
 
+	inviteMgr, err := invite.NewManager(invite.ManagerOptions{
+		Host:        host,
+		DHT:         host.DHT(),
+		Friends:     store,
+		Store:       inviteStore,
+		Identity:    opts.Identity.Priv,
+		IdentityPub: opts.Identity.Pub,
+		Log:         opts.Log,
+		DisplayName: opts.Config.User.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("constructing invite manager: %w", err)
+	}
+	inviteMgr.Start()
+	defer inviteMgr.Stop()
+
 	if !opts.DisableMDNS {
 		stopMDNS, err := p2p.EnableMDNS(host, "opencom")
 		if err != nil {
@@ -122,20 +144,11 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	if err := os.Remove(opts.Paths.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		opts.Log.Warn("could not remove stale socket",
-			zap.String("path", opts.Paths.SocketPath),
-			zap.Error(err))
-	}
-	listener, err := net.Listen("unix", opts.Paths.SocketPath)
+	listener, err := ipc.Listen(opts.Paths.SocketPath)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", opts.Paths.SocketPath, err)
 	}
 	defer listener.Close()
-	defer func() { _ = os.Remove(opts.Paths.SocketPath) }()
-	if err := os.Chmod(opts.Paths.SocketPath, 0o600); err != nil {
-		return fmt.Errorf("chmod socket: %w", err)
-	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -186,6 +199,13 @@ func Run(ctx context.Context, opts Options) error {
 	server.Register("calls.list", methods.CallsList(callMgr))
 	server.Register("calls.attach", methods.CallsAttach(callMgr))
 	server.Register("calls.action", methods.CallsAction(callEngine, callMgr))
+	server.Register("invite.create", methods.InviteCreate(inviteMgr))
+	server.Register("invite.list", methods.InviteList(inviteStore))
+	server.Register("invite.revoke", methods.InviteRevoke(inviteMgr))
+	server.Register("invite.redeem", methods.InviteRedeem(inviteMgr))
+	server.Register("daemon.status_summary",
+		methods.DaemonStatusSummary(opts.Version, opts.Identity, opts.StartedAt,
+			host.ListenAddrs, host.Reachability, store, presence, callMgr, inviteStore))
 
 	opts.Log.Info("daemon listening",
 		zap.String("socket", opts.Paths.SocketPath),
