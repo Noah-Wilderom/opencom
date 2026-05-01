@@ -51,12 +51,13 @@ func startRealDaemon(t *testing.T) (sock string, peerID string, cleanup func()) 
 	done := make(chan struct{})
 	go func() {
 		_ = app.Run(ctx, app.Options{
-			Paths:     paths,
-			Config:    cfg,
-			Identity:  kp,
-			Log:       zap.NewNop(),
-			Version:   "e2e",
-			StartedAt: time.Now().UTC(),
+			Paths:        paths,
+			Config:       cfg,
+			Identity:     kp,
+			Log:          zap.NewNop(),
+			Version:      "e2e",
+			StartedAt:    time.Now().UTC(),
+			DisableAudio: true, // tests don't open real audio devices
 		})
 		close(done)
 	}()
@@ -344,6 +345,7 @@ func startRealDaemonWithBootstrap(t *testing.T, bootstraps []peer.AddrInfo) (soc
 			StartedAt:      time.Now().UTC(),
 			DisableMDNS:    true,
 			HostBootstraps: bootstraps,
+			DisableAudio:   true,
 		})
 		close(done)
 	}()

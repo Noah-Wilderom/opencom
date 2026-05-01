@@ -29,9 +29,12 @@ func TestDefault_AudioBitrateSensible(t *testing.T) {
 	t.Parallel()
 
 	c := config.Default()
-	assert.Equal(t, 32_000, c.Audio.Bitrate, "audio default 32 kbps")
+	assert.Equal(t, 48_000, c.Audio.Bitrate, "audio default 48 kbps (M8 — Discord parity for voice)")
 	assert.Equal(t, "auto", c.Audio.InputDevice)
 	assert.Equal(t, "auto", c.Audio.OutputDevice)
+	assert.Equal(t, 60, c.Audio.JitterTargetMs)
+	assert.Equal(t, 200, c.Audio.JitterMaxMs)
+	assert.True(t, c.Audio.AEC)
 }
 
 func TestDefault_VideoSensible(t *testing.T) {

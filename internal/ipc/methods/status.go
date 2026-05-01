@@ -52,7 +52,7 @@ func DaemonStatusSummary(
 		}
 		friendsResult := friendsOut.(FriendsListResult)
 
-		callsH := CallsList(callMgr)
+		callsH := CallsList(callMgr, nil)
 		callsOut, err := callsH(context.Background(), nil)
 		if err != nil {
 			return nil, err

@@ -41,12 +41,13 @@ func makeOptions(t *testing.T) app.Options {
 	cfg.User.Name = "Tester"
 
 	return app.Options{
-		Paths:     paths,
-		Config:    cfg,
-		Identity:  kp,
-		Log:       zap.NewNop(),
-		Version:   "test",
-		StartedAt: time.Now().UTC(),
+		Paths:        paths,
+		Config:       cfg,
+		Identity:     kp,
+		Log:          zap.NewNop(),
+		Version:      "test",
+		StartedAt:    time.Now().UTC(),
+		DisableAudio: true, // tests don't open real audio devices
 	}
 }
 

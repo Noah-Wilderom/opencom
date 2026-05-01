@@ -12,11 +12,14 @@ type UserConfig struct {
 
 // AudioConfig configures audio capture, encoding, and playback.
 type AudioConfig struct {
-	InputDevice  string `yaml:"input_device"`  // "auto" or driver-specific id
-	OutputDevice string `yaml:"output_device"` // "auto" or driver-specific id
-	InputGain    int    `yaml:"input_gain"`    // 0–100 (% of max; 100 = pass-through)
-	OutputGain   int    `yaml:"output_gain"`   // 0–100 (% of max; 100 = pass-through)
-	Bitrate      int    `yaml:"bitrate"`       // bits per second; Opus 16k–64k
+	InputDevice    string `yaml:"input_device"`     // "auto" or driver-specific id
+	OutputDevice   string `yaml:"output_device"`    // "auto" or driver-specific id
+	InputGain      int    `yaml:"input_gain"`       // 0–100 (% of max; 100 = pass-through)
+	OutputGain     int    `yaml:"output_gain"`      // 0–100 (% of max; 100 = pass-through)
+	Bitrate        int    `yaml:"bitrate"`          // bits per second; Opus 16k–64k (default 48000)
+	JitterTargetMs int    `yaml:"jitter_target_ms"` // jitter buffer target depth (default 60)
+	JitterMaxMs    int    `yaml:"jitter_max_ms"`    // jitter buffer hard cap before drops (default 200)
+	AEC            bool   `yaml:"aec"`              // enable echo cancellation; M8 is pass-through, real impl in M8.5
 }
 
 // VideoConfig configures video capture and encoding.
@@ -173,11 +176,14 @@ func Default() Config {
 	return Config{
 		User: UserConfig{Name: name},
 		Audio: AudioConfig{
-			InputDevice:  "auto",
-			OutputDevice: "auto",
-			InputGain:    100,
-			OutputGain:   100,
-			Bitrate:      32_000,
+			InputDevice:    "auto",
+			OutputDevice:   "auto",
+			InputGain:      100,
+			OutputGain:     100,
+			Bitrate:        48_000, // M8 default — Discord parity for voice
+			JitterTargetMs: 60,
+			JitterMaxMs:    200,
+			AEC:            true, // M8 ships pass-through; M8.5 swaps in real AEC
 		},
 		Video: VideoConfig{
 			Device:            "auto",

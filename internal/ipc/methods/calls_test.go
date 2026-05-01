@@ -143,7 +143,7 @@ func TestCallsList_ReturnsActiveSessions(t *testing.T) {
 	_ = s.ToRinging()
 	mA.Register(s)
 
-	h := methods.CallsList(mA)
+	h := methods.CallsList(mA, nil)
 	out, err := h(context.Background(), nil)
 	assert.NoError(t, err)
 	raw, _ := json.Marshal(out)
@@ -171,7 +171,7 @@ func TestCallsAction_Hangup(t *testing.T) {
 	out, err := rig.eA.Place(ctx, rig.pB)
 	assert.NoError(t, err)
 
-	h := methods.CallsAction(rig.eA, rig.mA)
+	h := methods.CallsAction(rig.eA, rig.mA, nil)
 	params, _ := json.Marshal(methods.CallsActionParams{
 		CallID: out.ID(), Action: "hangup", Reason: "test",
 	})
@@ -191,7 +191,7 @@ func TestCallsAction_AcceptInbound(t *testing.T) {
 	assert.NoError(t, err)
 	in := <-rig.mB.Inbound()
 
-	h := methods.CallsAction(rig.eB, rig.mB)
+	h := methods.CallsAction(rig.eB, rig.mB, nil)
 	params, _ := json.Marshal(methods.CallsActionParams{CallID: in.ID(), Action: "accept"})
 	_, err = h(context.Background(), params)
 	assert.NoError(t, err)
@@ -210,7 +210,7 @@ func TestCallsAction_NoSuchCall(t *testing.T) {
 	t.Parallel()
 
 	mA := call.NewManager()
-	h := methods.CallsAction(nil, mA)
+	h := methods.CallsAction(nil, mA, nil)
 
 	params, _ := json.Marshal(methods.CallsActionParams{CallID: "missing", Action: "hangup"})
 	_, err := h(context.Background(), params)
@@ -226,7 +226,7 @@ func TestCallsAction_InvalidAction(t *testing.T) {
 	mA := call.NewManager()
 	s := call.NewSession("c-1", peer.ID("p"), call.Outbound, time.Now)
 	mA.Register(s)
-	h := methods.CallsAction(nil, mA)
+	h := methods.CallsAction(nil, mA, nil)
 
 	params, _ := json.Marshal(methods.CallsActionParams{CallID: "c-1", Action: "bogus"})
 	_, err := h(context.Background(), params)

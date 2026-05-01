@@ -91,8 +91,8 @@ func startCallsServerForCLI(
 
 	s := ipc.NewServer(zap.NewNop(), "test")
 	s.Register("calls.start", methods.CallsStart(eA, mA, store))
-	s.Register("calls.list", methods.CallsList(mA))
-	s.Register("calls.action", methods.CallsAction(eA, mA))
+	s.Register("calls.list", methods.CallsList(mA, nil))
+	s.Register("calls.action", methods.CallsAction(eA, mA, nil))
 	s.Register("calls.attach", methods.CallsAttach(mA))
 	go func() { _ = s.Serve(ctx, ln) }()
 

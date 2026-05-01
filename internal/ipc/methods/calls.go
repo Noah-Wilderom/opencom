@@ -9,10 +9,25 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"opencom/internal/audio"
 	"opencom/internal/call"
 	"opencom/internal/friends"
 	"opencom/internal/ipc"
 )
+
+// AudioMuter is the slice of audio.Manager that calls.action depends on
+// for mute/unmute actions. Defining it here avoids a hard import cycle
+// risk and keeps the IPC method package focused.
+type AudioMuter interface {
+	SetMuted(callID string, muted bool) bool
+}
+
+// AudioStatter exposes audio session stats per call. *audio.Manager
+// implements this; the daemon passes a no-op stub when audio is
+// disabled (e.g. in tests with DisableAudio: true).
+type AudioStatter interface {
+	Stats(callID string) (audio.Stats, bool)
+}
 
 // CallsStartParams is the calls.start request payload.
 type CallsStartParams struct {
@@ -33,6 +48,12 @@ type CallsListEntry struct {
 	Direction string    `json:"direction"`
 	Remote    peer.ID   `json:"remote"`
 	StartedAt time.Time `json:"started_at"`
+	// Audio fields — populated only when an audio session exists for the call.
+	Muted     bool   `json:"muted,omitempty"`
+	PeerMuted bool   `json:"peer_muted,omitempty"`
+	AudioOK   string `json:"audio_ok,omitempty"` // "ok" | "no-mic" | "no-output" | "unavailable" | ""
+	RxLevelDB int    `json:"rx_level_db,omitempty"`
+	TxLevelDB int    `json:"tx_level_db,omitempty"`
 }
 
 // CallsListResult is the calls.list response shape.
@@ -108,19 +129,31 @@ func CallsStart(eng *call.Engine, mgr *call.Manager, store *friends.Store) ipc.H
 	}
 }
 
-// CallsList returns all currently-tracked sessions, sorted by ID.
-func CallsList(mgr *call.Manager) ipc.Handler {
+// CallsList returns all currently-tracked sessions, sorted by ID. When
+// audioStatter is non-nil, each entry is enriched with audio stats if an
+// audio session exists for that call.
+func CallsList(mgr *call.Manager, audioStatter AudioStatter) ipc.Handler {
 	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		all := mgr.List()
 		out := CallsListResult{Calls: make([]CallsListEntry, 0, len(all))}
 		for _, s := range all {
-			out.Calls = append(out.Calls, CallsListEntry{
+			entry := CallsListEntry{
 				CallID:    s.ID(),
 				State:     s.State().String(),
 				Direction: s.Direction().String(),
 				Remote:    s.Remote(),
 				StartedAt: s.StartedAt(),
-			})
+			}
+			if audioStatter != nil {
+				if stats, ok := audioStatter.Stats(s.ID()); ok {
+					entry.Muted = stats.Muted
+					entry.PeerMuted = stats.PeerMuted
+					entry.AudioOK = "ok"
+					entry.RxLevelDB = stats.RxPeakDBFS
+					entry.TxLevelDB = stats.TxPeakDBFS
+				}
+			}
+			out.Calls = append(out.Calls, entry)
 		}
 		return out, nil
 	}
@@ -148,12 +181,32 @@ func CallsAttach(mgr *call.Manager) ipc.Handler {
 	}
 }
 
-// CallsAction performs accept/hangup on an existing call.
-func CallsAction(eng *call.Engine, mgr *call.Manager) ipc.Handler {
+// CallsAction performs accept/hangup/mute/unmute on an existing call.
+// audioMuter is optional; when nil, mute/unmute return an error indicating
+// that audio is not enabled on this daemon.
+func CallsAction(eng *call.Engine, mgr *call.Manager, audioMuter AudioMuter) ipc.Handler {
 	return func(_ context.Context, raw json.RawMessage) (interface{}, error) {
 		var p CallsActionParams
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, ipc.NewError(ipc.ErrCodeInvalidParams, "invalid params: "+err.Error())
+		}
+		switch p.Action {
+		case "mute":
+			if audioMuter == nil {
+				return nil, ipc.NewError(ipc.ErrCodeNoSuchCall, "audio not enabled on this daemon")
+			}
+			if !audioMuter.SetMuted(p.CallID, true) {
+				return nil, ipc.NewError(ipc.ErrCodeNoSuchCall, "no audio session for call "+p.CallID)
+			}
+			return map[string]string{"status": "muted"}, nil
+		case "unmute":
+			if audioMuter == nil {
+				return nil, ipc.NewError(ipc.ErrCodeNoSuchCall, "audio not enabled on this daemon")
+			}
+			if !audioMuter.SetMuted(p.CallID, false) {
+				return nil, ipc.NewError(ipc.ErrCodeNoSuchCall, "no audio session for call "+p.CallID)
+			}
+			return map[string]string{"status": "unmuted"}, nil
 		}
 		s, ok := mgr.Get(p.CallID)
 		if !ok {
@@ -170,7 +223,7 @@ func CallsAction(eng *call.Engine, mgr *call.Manager) ipc.Handler {
 			}
 		default:
 			return nil, ipc.NewError(ipc.ErrCodeInvalidParams,
-				fmt.Sprintf("unknown action %q (expected: accept | hangup)", p.Action))
+				fmt.Sprintf("unknown action %q (expected: accept | hangup | mute | unmute)", p.Action))
 		}
 		return CallsOK{Status: "ok"}, nil
 	}

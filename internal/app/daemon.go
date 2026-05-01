@@ -14,6 +14,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"go.uber.org/zap"
 
+	"opencom/internal/audio"
 	"opencom/internal/call"
 	"opencom/internal/discovery"
 	"opencom/internal/friends"
@@ -255,6 +256,45 @@ func Run(ctx context.Context, opts Options) error {
 	callEngine.Start()
 	defer callEngine.Stop()
 
+	// Audio plane (M8). Skipped when DisableAudio is set (CLI/integration
+	// tests that exercise call control without real audio hardware —
+	// multiple parallel malgo init crashes PulseAudio's mainloop).
+	var audioMgr *audio.Manager
+	if !opts.DisableAudio {
+		audioMgr, err = audio.NewManager(audio.ManagerOptions{
+			Host:  host.HostInternal(),
+			Calls: callMgr,
+			Config: audio.ManagerConfig{
+				InputDevice:    opts.Config.Audio.InputDevice,
+				OutputDevice:   opts.Config.Audio.OutputDevice,
+				Bitrate:        opts.Config.Audio.Bitrate,
+				JitterTargetMs: opts.Config.Audio.JitterTargetMs,
+				JitterMaxMs:    opts.Config.Audio.JitterMaxMs,
+				AECEnabled:     opts.Config.Audio.AEC,
+			},
+			Log: opts.Log.Named("audio"),
+		})
+		if err != nil {
+			return fmt.Errorf("constructing audio manager: %w", err)
+		}
+		go audioMgr.Start(ctx)
+		defer audioMgr.Stop()
+
+		host.HostInternal().SetStreamHandler(audio.AudioControlProtocol,
+			audioMgr.HandleControlStream)
+		defer host.HostInternal().RemoveStreamHandler(audio.AudioControlProtocol)
+	}
+
+	// Build nil-safe interface values for audio-dependent IPC handlers.
+	// We deliberately avoid boxing a (*audio.Manager)(nil) into an interface,
+	// which would make the interface non-nil despite holding a nil pointer.
+	var audioMuter methods.AudioMuter
+	var audioStatter methods.AudioStatter
+	if audioMgr != nil {
+		audioMuter = audioMgr
+		audioStatter = audioMgr
+	}
+
 	inviteMgr, err := invite.NewManager(invite.ManagerOptions{
 		Host:        host,
 		DHT:         host.DHT(),
@@ -332,9 +372,9 @@ func Run(ctx context.Context, opts Options) error {
 	server.Register("friends.show", methods.FriendsShow(store, presence))
 	server.Register("friends.subscribe_presence", methods.FriendsSubscribePresence(presence))
 	server.Register("calls.start", methods.CallsStart(callEngine, callMgr, store))
-	server.Register("calls.list", methods.CallsList(callMgr))
+	server.Register("calls.list", methods.CallsList(callMgr, audioStatter))
 	server.Register("calls.attach", methods.CallsAttach(callMgr))
-	server.Register("calls.action", methods.CallsAction(callEngine, callMgr))
+	server.Register("calls.action", methods.CallsAction(callEngine, callMgr, audioMuter))
 	// Reachable addrs = public + relay-circuit. Used by `opencom invite`
 	// to warn the user if no cross-network address has been reserved yet.
 	reachableAddrs := func() []string {

@@ -35,4 +35,11 @@ type Options struct {
 	// AutoRelay. nil = use cfg.Relay.Peers (default: public libp2p
 	// bootstraps); empty (non-nil) disables AutoRelay entirely.
 	HostRelays []peer.AddrInfo
+
+	// DisableAudio skips audio.Manager construction entirely. Used by
+	// CLI/integration tests that exercise call control without real
+	// audio hardware — multiple parallel tests opening malgo devices
+	// crashes PulseAudio's mainloop ("STATE_PASSIVE assertion").
+	// Production daemons leave this false.
+	DisableAudio bool
 }

@@ -96,3 +96,72 @@ func TestManager_RegisterIdempotent(t *testing.T) {
 
 	assert.Len(t, m.List(), 1)
 }
+
+func TestManager_SubscribeStateChanges_DeliversEvents(t *testing.T) {
+	t.Parallel()
+	mgr := call.NewManager()
+	sub := mgr.SubscribeStateChanges()
+	defer mgr.UnsubscribeStateChanges(sub)
+
+	// Register a session and drive through all states to Connected.
+	sess := call.NewSession("call-1", peer.ID("remotePeer"), call.Outbound, nil)
+	mgr.Register(sess)
+	assert.NoError(t, sess.ToRinging())
+	assert.NoError(t, sess.ToConnecting())
+	assert.NoError(t, sess.ToConnected())
+
+	// Drain until we see "connected" (earlier events may precede it).
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case ev := <-sub:
+			if ev.State == "connected" {
+				assert.Equal(t, "call-1", ev.SessionID)
+				return
+			}
+		case <-deadline:
+			t.Fatal("no connected state change event received")
+		}
+	}
+}
+
+func TestManager_SubscribeStateChanges_BackfillsExisting(t *testing.T) {
+	t.Parallel()
+	mgr := call.NewManager()
+	// Pre-register a session BEFORE subscribing.
+	sess := call.NewSession("call-1", peer.ID("remotePeer"), call.Outbound, nil)
+	mgr.Register(sess)
+
+	sub := mgr.SubscribeStateChanges()
+	defer mgr.UnsubscribeStateChanges(sub)
+
+	// Late subscribers still receive future transitions on existing sessions.
+	assert.NoError(t, sess.ToRinging())
+	assert.NoError(t, sess.ToConnecting())
+	assert.NoError(t, sess.ToConnected())
+
+	// Drain until we see "connected".
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case ev := <-sub:
+			if ev.State == "connected" {
+				assert.Equal(t, "call-1", ev.SessionID)
+				return
+			}
+		case <-deadline:
+			t.Fatal("late subscriber missed event from pre-existing session")
+		}
+	}
+}
+
+func TestManager_UnsubscribeStateChanges_StopsDelivery(t *testing.T) {
+	t.Parallel()
+	mgr := call.NewManager()
+	sub := mgr.SubscribeStateChanges()
+	mgr.UnsubscribeStateChanges(sub)
+
+	// Channel should be closed.
+	_, ok := <-sub
+	assert.False(t, ok)
+}
