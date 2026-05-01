@@ -32,12 +32,17 @@ type FriendStore interface {
 	Add(f friends.Friend) error
 }
 
-// AddressProvider exposes the host's current public-facing addresses.
-// We deliberately publish only public + relay addresses (not loopback
-// or RFC1918) so an invite record published from a real machine
-// doesn't ask the redeemer to dial /ip4/127.0.0.1/...
+// AddressProvider exposes the host's current addresses for embedding
+// in invite records and URLs.
+//
+// Unlike the discovery layer (which publishes to a shared DHT and
+// must filter to PublicAddrs to avoid leaking LAN topology to
+// arbitrary peers), invites are explicitly shared out-of-band by
+// the user — so embedding RFC1918 / loopback addresses is fine and
+// in fact necessary for LAN-only redemption to work without an
+// internet round-trip.
 type AddressProvider interface {
-	PublicAddrs() []ma.Multiaddr
+	InviteAddrs() []ma.Multiaddr
 }
 
 // ManagerOptions configures a Manager.
@@ -132,19 +137,31 @@ func (m *Manager) Stop() {
 }
 
 // CreateResult is the outcome of a successful Create call.
+//
+// DHTPublishErr is non-nil when the encrypted DHT record could not be
+// published (typically: empty routing table when no opencom bootstrap
+// peers are reachable). Callers should treat this as a warning, not a
+// failure: the URL form is self-contained and remains usable; only the
+// short-code redemption path needs the DHT.
 type CreateResult struct {
-	Code      Code
-	URL       string
-	ExpiresAt time.Time
+	Code          Code
+	URL           string
+	ExpiresAt     time.Time
+	DHTPublishErr error
 }
 
-// Create generates a fresh invite code, publishes the encrypted record
-// to the DHT under DeriveDHTKey(code), records it in the local store,
-// and returns the code together with its URL form and expiry.
+// Create generates a fresh invite code, signs a self-contained URL,
+// best-effort publishes the encrypted record to the DHT under
+// DeriveDHTKey(code), records the code in the local store, and returns
+// the code with its URL form and expiry.
 //
 // ttl is capped at MaxTTL. The store entry's expiry matches the
 // record's, so a redeem attempt against a still-cached-but-expired
 // invite is rejected on either side.
+//
+// DHT publish failure is non-fatal — see CreateResult.DHTPublishErr.
+// The URL is signed with the inviter's identity key, so RedeemURL can
+// verify and dial without ever touching the DHT.
 func (m *Manager) Create(ctx context.Context, ttl time.Duration) (CreateResult, error) {
 	if ttl <= 0 || ttl > MaxTTL {
 		ttl = MaxTTL
@@ -160,69 +177,130 @@ func (m *Manager) Create(ctx context.Context, ttl time.Duration) (CreateResult, 
 		return CreateResult{}, fmt.Errorf("marshalling public key: %w", err)
 	}
 	pubB64 := base64.StdEncoding.EncodeToString(pubBytes)
+	addrs := addrStrings(m.addrs.InviteAddrs())
 
-	addrs := addrStrings(m.addrs.PublicAddrs())
-
-	rec := Record{
-		Version:     RecordVersion,
+	// Build + sign the self-contained URL FIRST. This must succeed: the
+	// URL is the only redemption path that doesn't depend on a healthy
+	// DHT, so if signing fails (extremely unlikely with a valid identity
+	// key), the whole Create is a hard failure.
+	urlPayload := URLPayload{
 		PeerID:      m.host.ID().String(),
 		PublicKey:   pubB64,
 		Addresses:   addrs,
 		DisplayName: m.displayName,
+		Code:        code,
 		ExpiresAt:   expires.Unix(),
 	}
-
-	encKey := DeriveEncryptionKey(code)
-	blob, err := Encode(rec, encKey, m.priv)
+	signedURL, err := SignURL(urlPayload, m.priv)
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("encoding record: %w", err)
-	}
-	if err := m.dht.PutValue(ctx, DeriveDHTKey(code), blob); err != nil {
-		return CreateResult{}, fmt.Errorf("publishing to DHT: %w", err)
+		return CreateResult{}, fmt.Errorf("signing url: %w", err)
 	}
 
+	// Add to local store BEFORE the DHT attempt so the inviter-side
+	// handshake can validate the code even if DHT publish fails.
 	m.store.Add(Entry{
 		Code:      code,
 		ExpiresAt: expires,
 		CreatedAt: time.Now(),
 	})
 
-	urlForm := FormatURL(URLPayload{
-		PeerID:      rec.PeerID,
+	// Best-effort DHT publish. The encrypted record carries everything
+	// the URL does (and is keyed by hash(code)), so a successful publish
+	// enables short-code redemption. Failure here typically means an
+	// empty kad-dht routing table — log and surface to the caller, but
+	// don't fail Create.
+	rec := Record{
+		Version:     RecordVersion,
+		PeerID:      urlPayload.PeerID,
+		PublicKey:   pubB64,
 		Addresses:   addrs,
-		DisplayName: rec.DisplayName,
-		Code:        code,
-	})
-	return CreateResult{Code: code, URL: urlForm, ExpiresAt: expires}, nil
+		DisplayName: m.displayName,
+		ExpiresAt:   expires.Unix(),
+	}
+	encKey := DeriveEncryptionKey(code)
+	blob, encErr := Encode(rec, encKey, m.priv)
+	var dhtErr error
+	if encErr != nil {
+		dhtErr = fmt.Errorf("encoding record: %w", encErr)
+	} else if putErr := m.dht.PutValue(ctx, DeriveDHTKey(code), blob); putErr != nil {
+		dhtErr = fmt.Errorf("publishing to dht: %w", putErr)
+	}
+	if dhtErr != nil {
+		m.log.Warn("invite: dht publish failed; short code unusable until dht recovers, url form still works",
+			zap.Error(dhtErr))
+	}
+
+	return CreateResult{
+		Code:          code,
+		URL:           FormatURL(signedURL),
+		ExpiresAt:     expires,
+		DHTPublishErr: dhtErr,
+	}, nil
 }
 
-// Redeem fetches the DHT record for c, verifies its signature against
-// the embedded public key (two-pass: decrypt → extract pubkey →
-// re-decrypt + verify), opens a libp2p stream to the inviter, sends
-// our Hello, reads the inviter's Response, and on accept adds the
-// inviter to the friends store.
-func (m *Manager) Redeem(ctx context.Context, c Code) (friends.Friend, error) {
-	return m.redeem(ctx, c, nil)
-}
-
-// RedeemURL parses an opencom://join?... URL and delegates to Redeem
-// for the cryptographic flow.
+// Redeem looks up the DHT record for c, verifies its signature, and
+// completes the friend-handshake with the inviter.
 //
-// The URL embeds peer ID and addresses but NOT the inviter's public
-// key or the record signature, so we still fetch the DHT record to
-// verify the inviter cryptographically. The URL form is therefore
-// not currently a true "offline" path — see spec §3.5 for the planned
-// future evolution that would embed pubkey+signature.
+// The DHT path is required: only the inviter knows the encryption key
+// (derived from the secret code) and only their identity key signed
+// the record. Without DHT access (no opencom bootstrap peers reachable)
+// short-code redemption can't work — use the URL form instead.
+func (m *Manager) Redeem(ctx context.Context, c Code) (friends.Friend, error) {
+	encKey := DeriveEncryptionKey(c)
+	blob, err := m.dht.GetValue(ctx, DeriveDHTKey(c))
+	if err != nil {
+		return friends.Friend{}, fmt.Errorf("fetching invite record: %w", err)
+	}
+
+	// Two-pass decode: first decrypt to read the embedded pubkey, then
+	// fully verify with that pubkey. AEAD authenticates both passes.
+	rawRec, err := DecodeUnverified(blob, encKey)
+	if err != nil {
+		return friends.Friend{}, fmt.Errorf("decoding invite record: %w", err)
+	}
+	inviterPub, err := decodePubKey(rawRec.PublicKey)
+	if err != nil {
+		return friends.Friend{}, err
+	}
+	rec, err := Decode(blob, encKey, inviterPub)
+	if err != nil {
+		return friends.Friend{}, fmt.Errorf("verifying invite record: %w", err)
+	}
+
+	inviterID, err := peer.IDFromPublicKey(inviterPub)
+	if err != nil {
+		return friends.Friend{}, fmt.Errorf("deriving inviter peer id: %w", err)
+	}
+	if rec.PeerID != inviterID.String() {
+		return friends.Friend{}, errors.New("invite record peer id does not match embedded public key")
+	}
+
+	return m.dialAndHandshake(ctx, c, inviterID, rec.Addresses, rec.PublicKey)
+}
+
+// RedeemURL parses an opencom://join?... URL, verifies the embedded
+// signature locally, and completes the friend-handshake with the
+// inviter. Does NOT touch the DHT — the URL is fully self-contained.
+//
+// Use this when DHT-based discovery is unavailable (no opencom
+// bootstrap peers, fresh single-machine setup, or LAN-only testing).
 func (m *Manager) RedeemURL(ctx context.Context, urlStr string) (friends.Friend, error) {
 	payload, err := ParseURL(urlStr)
 	if err != nil {
 		return friends.Friend{}, fmt.Errorf("parsing url: %w", err)
 	}
-	pid, err := peer.Decode(payload.PeerID)
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("decoding peer id: %w", err)
+	if payload.ExpiresAt > 0 && time.Now().Unix() > payload.ExpiresAt {
+		return friends.Friend{}, ErrExpired
 	}
-	return m.redeem(ctx, payload.Code, &pid)
+	inviterPub, err := VerifyURL(payload)
+	if err != nil {
+		return friends.Friend{}, fmt.Errorf("verifying invite url: %w", err)
+	}
+	inviterID, err := peer.IDFromPublicKey(inviterPub)
+	if err != nil {
+		return friends.Friend{}, fmt.Errorf("deriving inviter peer id: %w", err)
+	}
+	return m.dialAndHandshake(ctx, payload.Code, inviterID, payload.Addresses, payload.PublicKey)
 }
 
 // Revoke deletes c from the local store. Returns true if an entry was
@@ -234,54 +312,18 @@ func (m *Manager) Revoke(c Code) bool {
 	return m.store.Remove(c)
 }
 
-// redeem is the core of Redeem and RedeemURL. If hintedPID is non-nil,
-// it's used to guide the dial — but the cryptographic identity is
-// always derived from the DHT record's embedded pubkey.
-func (m *Manager) redeem(ctx context.Context, c Code, hintedPID *peer.ID) (friends.Friend, error) {
-	encKey := DeriveEncryptionKey(c)
-	blob, err := m.dht.GetValue(ctx, DeriveDHTKey(c))
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("fetching invite record: %w", err)
-	}
-
-	// First pass: decrypt only, so we can learn the inviter's pubkey.
-	rawRec, err := DecodeUnverified(blob, encKey)
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("decoding invite record: %w", err)
-	}
-	pubBytes, err := base64.StdEncoding.DecodeString(rawRec.PublicKey)
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("decoding inviter public key: %w", err)
-	}
-	inviterPub, err := libp2pcrypto.UnmarshalPublicKey(pubBytes)
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("parsing inviter public key: %w", err)
-	}
-
-	// Second pass: full Decode with the now-known pubkey actually
-	// verifies the signature + expiry + version.
-	rec, err := Decode(blob, encKey, inviterPub)
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("verifying invite record: %w", err)
-	}
-
-	inviterID, err := peer.IDFromPublicKey(inviterPub)
-	if err != nil {
-		return friends.Friend{}, fmt.Errorf("deriving inviter peer id: %w", err)
-	}
-	// Defence in depth: PeerID embedded in the record must match the
-	// pubkey it claims to come from.
-	if rec.PeerID != inviterID.String() {
-		return friends.Friend{}, errors.New("invite record peer id does not match embedded public key")
-	}
-	if hintedPID != nil && *hintedPID != inviterID {
-		return friends.Friend{}, errors.New("invite url peer id does not match dht record")
-	}
-
-	// Inject the record's addresses into the peerstore so libp2p can
-	// dial the inviter without a fresh discovery round.
-	addrs := parseAddrs(rec.Addresses)
-	if len(addrs) > 0 {
+// dialAndHandshake is the post-verification half of redemption shared
+// by Redeem (DHT path) and RedeemURL (URL path). By this point the
+// caller has authenticated the inviter cryptographically — we only
+// need to inject addresses, dial, and run the friend-handshake stream.
+func (m *Manager) dialAndHandshake(
+	ctx context.Context,
+	c Code,
+	inviterID peer.ID,
+	inviterAddrs []string,
+	inviterPubKeyB64 string,
+) (friends.Friend, error) {
+	if addrs := parseAddrs(inviterAddrs); len(addrs) > 0 {
 		m.host.HostInternal().Peerstore().AddAddrs(inviterID, addrs, peerstore.TempAddrTTL)
 	}
 
@@ -295,15 +337,12 @@ func (m *Manager) redeem(ctx context.Context, c Code, hintedPID *peer.ID) (frien
 	if err != nil {
 		return friends.Friend{}, fmt.Errorf("marshalling our public key: %w", err)
 	}
-	ourPubB64 := base64.StdEncoding.EncodeToString(ourPubBytes)
-	ourAddrs := addrStrings(m.addrs.PublicAddrs())
-
 	if err := SendHello(stream, Hello{
 		Type:        TypeRedeem,
 		Code:        c,
 		PeerID:      m.host.ID().String(),
-		PublicKey:   ourPubB64,
-		Addresses:   ourAddrs,
+		PublicKey:   base64.StdEncoding.EncodeToString(ourPubBytes),
+		Addresses:   addrStrings(m.addrs.InviteAddrs()),
 		DisplayName: m.displayName,
 	}); err != nil {
 		_ = stream.Reset()
@@ -324,13 +363,26 @@ func (m *Manager) redeem(ctx context.Context, c Code, hintedPID *peer.ID) (frien
 	added := friends.Friend{
 		Name:      resp.DisplayName,
 		PeerID:    inviterID,
-		PublicKey: rec.PublicKey,
+		PublicKey: inviterPubKeyB64,
 		AddedAt:   time.Now().UTC(),
 	}
 	if err := m.friends.Add(added); err != nil {
 		return friends.Friend{}, fmt.Errorf("adding friend: %w", err)
 	}
 	return added, nil
+}
+
+// decodePubKey decodes a base64-encoded marshaled libp2p public key.
+func decodePubKey(b64 string) (libp2pcrypto.PubKey, error) {
+	pubBytes, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding public key: %w", err)
+	}
+	pub, err := libp2pcrypto.UnmarshalPublicKey(pubBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing public key: %w", err)
+	}
+	return pub, nil
 }
 
 // handleStream is the libp2p stream handler for inviter-side handshake

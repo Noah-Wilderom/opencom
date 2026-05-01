@@ -198,6 +198,17 @@ func (h *Host) ListenAddrs() []string {
 	return out
 }
 
+// InviteAddrs returns ALL of the host's bound multiaddrs (loopback,
+// LAN, public, relay) for embedding in invite records and URLs.
+//
+// Invites are shared out-of-band by the user; embedding LAN
+// addresses is required for the recipient to dial the inviter when
+// they're on the same network without an internet round-trip.
+// PublicAddrs is for DHT discovery records (which are broadcast to
+// untrusted peers); InviteAddrs is for explicitly-shared invite
+// payloads.
+func (h *Host) InviteAddrs() []ma.Multiaddr { return h.h.Addrs() }
+
 // PublicAddrs returns the host's multiaddrs that are usable from
 // the public internet: addresses on routable IP space (per
 // manet.IsPublicAddr) plus relay-circuit addresses (/p2p-circuit/...)

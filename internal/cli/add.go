@@ -30,7 +30,7 @@ func newAddCmd() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(),
 				"✓ Added %s (%s) as a friend.\n",
-				resp.Friend.Name, shortenPeerID(string(resp.Friend.PeerID)))
+				resp.Friend.Name, shortenPeerID(resp.Friend.PeerID.String()))
 			return nil
 		},
 	}

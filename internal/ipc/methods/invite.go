@@ -18,10 +18,15 @@ type InviteCreateParams struct {
 }
 
 // InviteCreateResult is the invite.create response shape.
+//
+// DHTPublishWarning is empty on success and a human-readable message
+// on best-effort DHT failure. When non-empty, the short Code may not
+// be redeemable until DHT recovers, but URL is always usable.
 type InviteCreateResult struct {
-	Code      string `json:"code"`
-	URL       string `json:"url"`
-	ExpiresAt int64  `json:"expires_at"`
+	Code              string `json:"code"`
+	URL               string `json:"url"`
+	ExpiresAt         int64  `json:"expires_at"`
+	DHTPublishWarning string `json:"dht_publish_warning,omitempty"`
 }
 
 // InviteListResult is the invite.list response shape.
@@ -82,11 +87,15 @@ func InviteCreate(mgr *invite.Manager) ipc.Handler {
 		if err != nil {
 			return nil, ipc.NewError(ipc.ErrCodeInternalError, err.Error())
 		}
-		return InviteCreateResult{
+		out := InviteCreateResult{
 			Code:      res.Code.Pretty(),
 			URL:       res.URL,
 			ExpiresAt: res.ExpiresAt.Unix(),
-		}, nil
+		}
+		if res.DHTPublishErr != nil {
+			out.DHTPublishWarning = res.DHTPublishErr.Error()
+		}
+		return out, nil
 	}
 }
 

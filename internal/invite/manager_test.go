@@ -20,28 +20,41 @@ import (
 	"opencom/internal/transport/p2p"
 )
 
-// allAddrsProvider exposes the host's full address set (including
-// loopback) for tests that run on /ip4/127.0.0.1. Production uses
-// host.PublicAddrs() which filters loopback.
+// allAddrsProvider exposes the host's full address set for tests.
+// Production manager uses host.InviteAddrs() which is also unfiltered;
+// this struct exists so tests can choose the address-source explicitly.
 type allAddrsProvider struct{ h *p2p.Host }
 
-func (a allAddrsProvider) PublicAddrs() []ma.Multiaddr { return a.h.HostInternal().Addrs() }
+func (a allAddrsProvider) InviteAddrs() []ma.Multiaddr { return a.h.HostInternal().Addrs() }
 
 type fakeDHTMgr struct {
-	mu  sync.Mutex
-	put map[string][]byte
+	mu        sync.Mutex
+	put       map[string][]byte
+	failPut   bool // when true, PutValue returns ErrPutFailed
+	failGet   bool // when true, GetValue returns ErrGetFailed
 }
+
+var (
+	errFakePutFailed = assert.AnError
+	errFakeGetFailed = assert.AnError
+)
 
 func newFakeDHTMgr() *fakeDHTMgr { return &fakeDHTMgr{put: make(map[string][]byte)} }
 func (f *fakeDHTMgr) PutValue(_ context.Context, key string, val []byte, _ ...routing.Option) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failPut {
+		return errFakePutFailed
+	}
 	f.put[key] = append([]byte(nil), val...)
 	return nil
 }
 func (f *fakeDHTMgr) GetValue(_ context.Context, key string, _ ...routing.Option) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failGet {
+		return nil, errFakeGetFailed
+	}
 	v, ok := f.put[key]
 	if !ok {
 		return nil, assert.AnError
@@ -193,4 +206,55 @@ func TestManager_Revoke(t *testing.T) {
 
 	// Re-revoke should report unknown.
 	assert.False(t, rig.alice.Revoke(res.Code), "revoking unknown code should return false")
+}
+
+// TestManager_RedeemURL_WorksWithoutDHT proves the URL form is fully
+// self-contained: even with the DHT completely broken (Get/Put both
+// fail), URL-based redemption succeeds because pubkey+signature are
+// embedded in the URL itself.
+func TestManager_RedeemURL_WorksWithoutDHT(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rig := newManagerRig(t, ctx)
+
+	// First create the invite while DHT is healthy so the local store
+	// records the code; the URL form is what we'll later redeem.
+	res, err := rig.alice.Create(ctx, 30*time.Minute)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, res.URL)
+
+	// Now break the DHT entirely. Bob redeems via URL — must succeed.
+	rig.dht.mu.Lock()
+	rig.dht.failGet = true
+	rig.dht.failPut = true
+	rig.dht.mu.Unlock()
+
+	added, err := rig.bob.RedeemURL(ctx, res.URL)
+	assert.NoError(t, err, "RedeemURL must work without DHT")
+	assert.Equal(t, rig.hA.ID(), added.PeerID)
+	assert.Equal(t, "alice", added.Name)
+}
+
+// TestManager_Create_NonFatalDHTFailure confirms Create still returns
+// a usable invite (with DHTPublishErr set) when DHT publish fails.
+func TestManager_Create_NonFatalDHTFailure(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rig := newManagerRig(t, ctx)
+	rig.dht.mu.Lock()
+	rig.dht.failPut = true
+	rig.dht.mu.Unlock()
+
+	res, err := rig.alice.Create(ctx, 30*time.Minute)
+	assert.NoError(t, err, "Create must NOT fail when DHT publish fails")
+	assert.NotEmpty(t, res.URL, "URL must still be returned")
+	assert.NotEmpty(t, res.Code, "code must still be returned")
+	assert.Error(t, res.DHTPublishErr, "DHTPublishErr must surface the failure")
+
+	// And Bob can still redeem via URL.
+	added, err := rig.bob.RedeemURL(ctx, res.URL)
+	assert.NoError(t, err)
+	assert.Equal(t, rig.hA.ID(), added.PeerID)
 }

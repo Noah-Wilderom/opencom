@@ -82,7 +82,38 @@ func TestInviteCreate_PrintsCodeAndExpiry(t *testing.T) {
 	s := out.String()
 	assert.Contains(t, s, "Invite code: OPEN-K8R3-MZ2X")
 	assert.Contains(t, s, "opencom add OPEN-K8R3-MZ2X")
-	assert.NotContains(t, s, "opencom://join", "URL should not appear by default after --offline removal")
+	assert.Contains(t, s, "opencom://join", "URL form is now always shown (self-contained, works without DHT)")
+}
+
+// TestInviteCreate_DHTWarning_LeadsWithURL exercises the
+// graceful-degradation path: when invite.create reports a DHT publish
+// failure, the CLI hides the short code and leads with the URL.
+func TestInviteCreate_DHTWarning_LeadsWithURL(t *testing.T) {
+	withTempPaths(t)
+	stop := startInviteServer(t, map[string]ipc.Handler{
+		"invite.create": func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+			return methods.InviteCreateResult{
+				Code:              "OPEN-K8R3-MZ2X",
+				URL:               "opencom://join?code=K8R3MZ2X&p=12D3&...",
+				ExpiresAt:         time.Now().Add(15 * time.Minute).Unix(),
+				DHTPublishWarning: "publishing to dht: failed to find any peer in table",
+			}, nil
+		},
+	})
+	defer stop()
+
+	root := cli.NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"invite"})
+	assert.NoError(t, root.Execute())
+
+	s := out.String()
+	assert.Contains(t, s, "Invite URL:", "URL is the headline when DHT publish failed")
+	assert.Contains(t, s, "opencom://join", "URL is shown")
+	assert.Contains(t, s, "couldn't be published", "user is told short code is unusable")
+	assert.Contains(t, s, "OPEN-K8R3-MZ2X", "short code is mentioned in the warning context")
 }
 
 func TestInviteCreate_ForwardsTTLFlag(t *testing.T) {

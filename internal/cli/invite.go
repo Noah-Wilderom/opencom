@@ -33,11 +33,32 @@ func newInviteCmd() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Invite code: %s\n", resp.Code)
 			expiresIn := time.Until(time.Unix(resp.ExpiresAt, 0)).Round(time.Minute)
-			fmt.Fprintf(out, "Expires in:  %s\n", expiresIn)
-			fmt.Fprintln(out)
-			fmt.Fprintf(out, "Share this with a friend. They run:\n  opencom add %s\n", resp.Code)
+
+			if resp.DHTPublishWarning == "" {
+				// DHT publish succeeded — short code works as the headline.
+				fmt.Fprintf(out, "Invite code: %s\n", resp.Code)
+				fmt.Fprintf(out, "Or URL:      %s\n", resp.URL)
+				fmt.Fprintf(out, "Expires in:  %s\n", expiresIn)
+				fmt.Fprintln(out)
+				fmt.Fprintf(out, "Share this with a friend. They run:\n")
+				fmt.Fprintf(out, "  opencom add %s\n", resp.Code)
+				fmt.Fprintf(out, "    or\n")
+				fmt.Fprintf(out, "  opencom add '%s'\n", resp.URL)
+			} else {
+				// DHT publish failed — short code is not redeemable until
+				// DHT recovers; lead with the URL.
+				fmt.Fprintf(out, "Invite URL:  %s\n", resp.URL)
+				fmt.Fprintf(out, "Expires in:  %s\n", expiresIn)
+				fmt.Fprintln(out)
+				fmt.Fprintf(out, "Note: short code (%s) couldn't be published to the DHT\n",
+					resp.Code)
+				fmt.Fprintf(out, "      (%s).\n", resp.DHTPublishWarning)
+				fmt.Fprintf(out, "      The URL form above is self-contained and works without DHT.\n")
+				fmt.Fprintln(out)
+				fmt.Fprintf(out, "Share the URL with a friend. They run:\n")
+				fmt.Fprintf(out, "  opencom add '%s'\n", resp.URL)
+			}
 			return nil
 		},
 	}
