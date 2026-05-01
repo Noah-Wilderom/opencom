@@ -32,6 +32,20 @@ type VideoConfig struct {
 type NetworkConfig struct {
 	ListenPort int `yaml:"listen_port"` // 0 = ephemeral
 	BitrateCap int `yaml:"bitrate_cap"` // bits per second; 0 = no cap
+
+	// ForceReachability bypasses AutoNAT v2's reachability detection.
+	// AutoNAT v2 needs ~3 distinct peers running AutoNAT-server to
+	// determine reachability with confidence; a fresh client with
+	// only the project's bootstrap peer in its routing table never
+	// gets that quorum, so AutoRelay never reserves a circuit.
+	//
+	// Values:
+	//   "" / "auto"  – use AutoNAT (only safe with a populated DHT)
+	//   "private"    – assume behind NAT; reserve a relay slot
+	//                  immediately. Default for clients.
+	//   "public"     – assume directly reachable. Used by relay
+	//                  nodes that know their public IP.
+	ForceReachability string `yaml:"force_reachability"`
 }
 
 // DiscoveryConfig configures peer discovery layers.
@@ -40,14 +54,26 @@ type DiscoveryConfig struct {
 	DHT  bool          `yaml:"dht"`
 	TTL  time.Duration `yaml:"ttl"` // DHT registration refresh
 
+	// DHTMode controls libp2p-kad-dht mode: "auto" | "server" |
+	// "client". Default "auto" picks based on AutoNAT reachability
+	// (clients behind NAT default to client mode and don't respond to
+	// queries; publicly-reachable nodes default to server mode and
+	// participate fully).
+	//
+	// Bootstrap/relay nodes MUST set this to "server" — auto mode
+	// won't promote a fresh node to server until AutoNAT confirms
+	// reachability via other peers, which requires the routing table
+	// to already be populated (chicken-and-egg).
+	DHTMode string `yaml:"dht_mode"`
+
 	// Bootstraps is the list of opencom-protocol DHT bootstrap peers
 	// (multiaddrs with /p2p/<peer-id> suffix). Used to seed the
-	// /opencom/kad/1.0.0 routing table. Default: empty (until the
-	// project ships its own bootstrap nodes — see M8).
+	// /opencom/kad/1.0.0 routing table.
 	//
 	// LAN-only deployments can leave this empty and rely on mDNS.
 	// Cross-network DHT discovery (short-code redemption) requires
-	// at least one reachable opencom bootstrap.
+	// at least one reachable opencom-protocol bootstrap that is in
+	// DHT server mode.
 	Bootstraps []string `yaml:"bootstraps"`
 }
 
@@ -92,20 +118,45 @@ type Config struct {
 	Daemon    DaemonConfig    `yaml:"daemon"`
 }
 
-// DefaultRelayPeers returns the canonical public libp2p relay-v2 nodes
-// shipped as the default Relay.Peers. These are Protocol Labs' public
-// IPFS bootstrap nodes, which run relay-v2 services as part of being
-// public infrastructure for the libp2p network.
+// opencomPublicNode is the project-operated relay + DHT bootstrap node.
+// One peer ID, two transports (TCP + QUIC) over IPv4 (via dns4) and IPv6
+// (via dns6) for both reachability and resilience.
 //
-// Reservation availability is best-effort — these nodes have rate
-// limits. For production deployments, override with self-hosted relays.
+// The same node serves two roles:
+//   - relay-v2: clients behind NAT reserve a /p2p-circuit slot through
+//     it so they can be dialed cross-network (Relay.Peers).
+//   - DHT bootstrap: clients connect to it to seed the opencom DHT
+//     routing table, enabling short-code redemption (Discovery.Bootstraps).
+//
+// To run your own and override these defaults, see deployments/README.md.
+var opencomPublicNode = []string{
+	"/dns4/opencom.noahwilderom.dev/tcp/4001/p2p/12D3KooWDBH9WwBd79Jjwk1sNenTbvteBeLF6GeDGgY6eyUFyxgJ",
+	"/dns4/opencom.noahwilderom.dev/udp/4001/quic-v1/p2p/12D3KooWDBH9WwBd79Jjwk1sNenTbvteBeLF6GeDGgY6eyUFyxgJ",
+	"/dns6/opencom.noahwilderom.dev/tcp/4001/p2p/12D3KooWDBH9WwBd79Jjwk1sNenTbvteBeLF6GeDGgY6eyUFyxgJ",
+	"/dns6/opencom.noahwilderom.dev/udp/4001/quic-v1/p2p/12D3KooWDBH9WwBd79Jjwk1sNenTbvteBeLF6GeDGgY6eyUFyxgJ",
+}
+
+// DefaultRelayPeers returns the public opencom relay node multiaddrs.
+// AutoRelay reserves a circuit-relay slot through these so clients
+// behind NAT get a /p2p-circuit/... address peers can dial.
+//
+// Override via config.yaml's relay.peers if running your own relay.
 func DefaultRelayPeers() []string {
-	return []string{
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-	}
+	out := make([]string, len(opencomPublicNode))
+	copy(out, opencomPublicNode)
+	return out
+}
+
+// DefaultDHTBootstraps returns the public opencom DHT bootstrap node
+// multiaddrs. Used to seed the /opencom/kad/1.0.0 routing table so
+// short-code (DHT-based) redemption works cross-network. Same nodes
+// as DefaultRelayPeers — the project's relay node also runs the DHT.
+//
+// Override via config.yaml's discovery.bootstraps if running your own.
+func DefaultDHTBootstraps() []string {
+	out := make([]string, len(opencomPublicNode))
+	copy(out, opencomPublicNode)
+	return out
 }
 
 // Default returns a Config populated with safe defaults. Used as the seed
@@ -136,17 +187,16 @@ func Default() Config {
 			EnableOnCallStart: true,
 		},
 		Network: NetworkConfig{
-			ListenPort: 0,
-			BitrateCap: 0,
+			ListenPort:        0,
+			BitrateCap:        0,
+			ForceReachability: "private",
 		},
 		Discovery: DiscoveryConfig{
-			MDNS: true,
-			DHT:  true,
-			TTL:  10 * time.Minute,
-			// Empty until opencom ships its own DHT bootstrap nodes
-			// (M8). Use []string{} (not nil) so YAML round-trips
-			// produce a stable shape.
-			Bootstraps: []string{},
+			MDNS:       true,
+			DHT:        true,
+			TTL:        10 * time.Minute,
+			DHTMode:    "auto",
+			Bootstraps: DefaultDHTBootstraps(),
 		},
 		Relay: RelayConfig{
 			Enabled: true,

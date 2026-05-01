@@ -52,6 +52,21 @@ done
 
 # --- System update + base packages ------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
+# Ubuntu 24.04+: needrestart pops up an interactive prompt during apt
+# upgrade and, worse, can decide to restart cloud-final.service — which is
+# the very service running this script — killing it mid-flight. Disable
+# both behaviors before any apt operation.
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/99-opencom.conf <<'EOF'
+# Disable interactive prompts and automatic service restarts during
+# unattended provisioning (managed by opencom setup-node.sh).
+$nrconf{restart} = 'a';
+$nrconf{kernelhints} = 0;
+$nrconf{ucodehints} = 0;
+EOF
+
 apt-get update -q
 apt-get -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
 
@@ -240,10 +255,13 @@ video:
 network:
   listen_port: ${OPENCOM_LISTEN_PORT}
   bitrate_cap: 0
+  force_reachability: public  # this node has a real public IP
 discovery:
   mdns: false       # public server — mDNS is pointless and noisy here
   dht: true
   ttl: 10m0s
+  dht_mode: server  # bootstrap node: must be in server mode so it
+                    # responds to FIND_NODE queries from clients
   bootstraps: []
 relay:
   enabled: true

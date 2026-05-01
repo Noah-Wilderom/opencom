@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/libp2p/go-libp2p/core/event"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	ma "github.com/multiformats/go-multiaddr"
 	"go.uber.org/zap"
 
@@ -20,15 +23,56 @@ import (
 	"opencom/internal/transport/p2p"
 )
 
+// parseDHTMode maps the "auto"|"server"|"client" string from
+// cfg.Discovery.DHTMode to libp2p-kad-dht's mode option. Empty string
+// (zero-value) maps to ModeAuto. An unknown value returns ModeAuto
+// plus an error so the caller can warn.
+func parseDHTMode(s string) (dht.ModeOpt, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return dht.ModeAuto, nil
+	case "server":
+		return dht.ModeServer, nil
+	case "client":
+		return dht.ModeClient, nil
+	default:
+		return dht.ModeAuto, fmt.Errorf("unknown dht mode %q (valid: auto, server, client)", s)
+	}
+}
+
+// parseReachability maps cfg.Network.ForceReachability into a
+// libp2p network.Reachability. Empty/"auto" → Unknown (no override).
+func parseReachability(s string) (network.Reachability, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return network.ReachabilityUnknown, nil
+	case "private":
+		return network.ReachabilityPrivate, nil
+	case "public":
+		return network.ReachabilityPublic, nil
+	default:
+		return network.ReachabilityUnknown, fmt.Errorf("unknown reachability %q (valid: auto, private, public)", s)
+	}
+}
+
 // parseAddrInfoList parses a YAML-configured list of /p2p/-suffixed
-// multiaddrs into peer.AddrInfo. Unparseable entries are logged and
-// skipped — a typo in one peer must not crash the daemon.
+// multiaddrs into peer.AddrInfo, MERGING multiaddrs that share the
+// same peer ID into a single AddrInfo with all of that peer's
+// addresses. Unparseable entries are logged and skipped — a typo in
+// one peer must not crash the daemon.
+//
+// Merging is essential for kad-dht / AutoRelay: passing N separate
+// AddrInfo entries for the same peer means downstream code only sees
+// one set of addresses (peerstore dedups by peer ID), so a host
+// without IPv6 internet would fail every bootstrap attempt because
+// libp2p only tried the dns6 address.
 //
 // Returns a non-nil empty slice when all entries fail (or input is
 // empty), so callers can distinguish "user configured empty list"
 // (disable feature) from "default applies" (nil sentinel).
 func parseAddrInfoList(addrs []string, log *zap.Logger, field string) []peer.AddrInfo {
-	out := make([]peer.AddrInfo, 0, len(addrs))
+	byPeer := make(map[peer.ID]*peer.AddrInfo)
+	order := make([]peer.ID, 0, len(addrs))
 	for _, s := range addrs {
 		m, err := ma.NewMultiaddr(s)
 		if err != nil {
@@ -42,7 +86,17 @@ func parseAddrInfoList(addrs []string, log *zap.Logger, field string) []peer.Add
 				zap.String("field", field), zap.String("addr", s), zap.Error(err))
 			continue
 		}
-		out = append(out, *info)
+		if existing, ok := byPeer[info.ID]; ok {
+			existing.Addrs = append(existing.Addrs, info.Addrs...)
+		} else {
+			merged := *info
+			byPeer[info.ID] = &merged
+			order = append(order, info.ID)
+		}
+	}
+	out := make([]peer.AddrInfo, 0, len(byPeer))
+	for _, id := range order {
+		out = append(out, *byPeer[id])
 	}
 	return out
 }
@@ -104,11 +158,24 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	dhtMode, err := parseDHTMode(opts.Config.Discovery.DHTMode)
+	if err != nil {
+		opts.Log.Warn("invalid discovery.dht_mode, using auto",
+			zap.String("value", opts.Config.Discovery.DHTMode), zap.Error(err))
+	}
+	forceReach, err := parseReachability(opts.Config.Network.ForceReachability)
+	if err != nil {
+		opts.Log.Warn("invalid network.force_reachability, using auto (AutoNAT)",
+			zap.String("value", opts.Config.Network.ForceReachability), zap.Error(err))
+	}
+
 	host, err := p2p.New(ctx, p2p.HostOptions{
-		PrivKey:        opts.Identity.Priv,
-		ListenAddrs:    listenAddrs,
-		BootstrapPeers: bootstraps,
-		RelayPeers:     relays,
+		PrivKey:           opts.Identity.Priv,
+		ListenAddrs:       listenAddrs,
+		BootstrapPeers:    bootstraps,
+		RelayPeers:        relays,
+		DHTMode:           dhtMode,
+		ForceReachability: forceReach,
 	})
 	if err != nil {
 		return fmt.Errorf("constructing libp2p host: %w", err)

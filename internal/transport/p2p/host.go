@@ -68,6 +68,21 @@ type HostOptions struct {
 	// waiting for AutoNAT to confirm public reachability (which never
 	// happens on a 3-node localhost test).
 	DHTMode dht.ModeOpt
+
+	// ForceReachability, when non-zero, bypasses AutoNAT v2 and
+	// forces libp2p to treat the host as having the given
+	// reachability. Required for AutoRelay to reserve a circuit
+	// without a quorum of AutoNAT servers — AutoNAT v2 needs
+	// multiple peers to determine reachability with confidence,
+	// which a fresh client with only one bootstrap peer doesn't
+	// have.
+	//
+	// Pass network.ReachabilityPrivate for clients that should
+	// always reserve a relay slot (typical home/mobile users).
+	// Pass network.ReachabilityPublic for the relay node itself.
+	// Zero value (network.ReachabilityUnknown) leaves AutoNAT in
+	// charge.
+	ForceReachability network.Reachability
 }
 
 // Host wraps the libp2p host with opencom-specific helpers, including
@@ -174,6 +189,15 @@ func New(ctx context.Context, opts HostOptions) (*Host, error) {
 		// so we get a /p2p-circuit/<relay>/p2p/<our-id> address that
 		// peers behind any NAT can dial.
 		libp2pOpts = append(libp2pOpts, libp2p.EnableAutoRelayWithStaticRelays(relays))
+	}
+	// ForceReachability bypasses AutoNAT (which needs multiple peers
+	// to converge) and tells AutoRelay to reserve immediately. See
+	// HostOptions.ForceReachability docstring.
+	switch opts.ForceReachability {
+	case network.ReachabilityPrivate:
+		libp2pOpts = append(libp2pOpts, libp2p.ForceReachabilityPrivate())
+	case network.ReachabilityPublic:
+		libp2pOpts = append(libp2pOpts, libp2p.ForceReachabilityPublic())
 	}
 	libp2pHost, err := libp2p.New(libp2pOpts...)
 	if err != nil {
