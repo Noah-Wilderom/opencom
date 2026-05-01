@@ -25,8 +25,14 @@ type Options struct {
 	// cross-network E2E test to force pure-DHT discovery.
 	DisableMDNS bool
 
-	// HostBootstraps overrides the libp2p bootstrap peer list. Defaults
-	// to the public IPFS bootstraps when empty/nil. Used by tests that
-	// run a private DHT against a single test bootstrap node.
+	// HostBootstraps overrides the opencom-DHT bootstrap peer list.
+	// nil = use the cfg.Discovery.Bootstraps from config (default
+	// empty); non-nil overrides for tests. Empty (non-nil) means
+	// "no DHT bootstraps" — used by tests on isolated networks.
 	HostBootstraps []peer.AddrInfo
+
+	// HostRelays overrides the libp2p relay-v2 peer list used by
+	// AutoRelay. nil = use cfg.Relay.Peers (default: public libp2p
+	// bootstraps); empty (non-nil) disables AutoRelay entirely.
+	HostRelays []peer.AddrInfo
 }

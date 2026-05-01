@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	kardianosservice "github.com/kardianos/service"
@@ -11,6 +12,32 @@ import (
 
 	"opencom/internal/ipc/methods"
 )
+
+// reachabilitySummary returns a one-line description of the host's
+// cross-network reachability:
+//   - "directly reachable"  → AutoNAT confirms public address
+//   - "via relay"           → AutoRelay reserved a /p2p-circuit slot
+//   - "LAN-only"            → no public path; redemption only on same network
+//   - "checking..."         → still negotiating (unknown reachability AND no relay yet)
+func reachabilitySummary(reach string, listenAddrs []string) string {
+	hasCircuit := false
+	for _, a := range listenAddrs {
+		if strings.Contains(a, "/p2p-circuit/") {
+			hasCircuit = true
+			break
+		}
+	}
+	switch {
+	case reach == "public":
+		return "directly reachable"
+	case hasCircuit:
+		return "via relay"
+	case reach == "private":
+		return "LAN-only (no relay reservation yet — try again in ~30s)"
+	default:
+		return "checking..."
+	}
+}
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
@@ -32,7 +59,8 @@ func newStatusCmd() *cobra.Command {
 			fmt.Fprintf(out, "Identity        : %s\n", resp.Identity.PeerID)
 			uptime := time.Since(resp.Identity.StartedAt).Round(time.Second)
 			fmt.Fprintf(out, "Daemon          : running (%s uptime)\n", uptime)
-			fmt.Fprintf(out, "Reachability    : %s\n", resp.Identity.Reachability)
+			fmt.Fprintf(out, "Reachability    : %s\n",
+				reachabilitySummary(resp.Identity.Reachability, resp.Identity.ListenAddrs))
 
 			// Service status: query kardianos client-side since the
 			// daemon doesn't know its own service-installation state.

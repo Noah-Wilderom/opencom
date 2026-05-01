@@ -58,7 +58,7 @@ func TestResolver_DHTLookupHappyPath(t *testing.T) {
 	bobPubBytes, _ := crypto.MarshalPublicKey(rig.bobPub)
 
 	aliceFriendsForAlice := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Bob", PeerID: rig.bobID, PublicKey: string(bobPubBytes)},
+		{Name: "Bob", PeerID: rig.bobID, PublicKey: base64.StdEncoding.EncodeToString(bobPubBytes)},
 	}}
 	pub, err := discovery.NewPublisher(discovery.PublisherOptions{
 		DHT:             rig.dht,
@@ -73,7 +73,7 @@ func TestResolver_DHTLookupHappyPath(t *testing.T) {
 
 	// Bob's resolver looks up Alice.
 	bobFriends := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: rig.aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: rig.aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	cache, err := discovery.OpenCache(filepath.Join(t.TempDir(), "cache.json"))
 	assert.NoError(t, err)
@@ -104,7 +104,7 @@ func TestResolver_CacheHitSkipsDHT(t *testing.T) {
 	alicePubBytes, _ := crypto.MarshalPublicKey(rig.alicePub)
 
 	bobFriends := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: rig.aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: rig.aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	cache, err := discovery.OpenCache(filepath.Join(t.TempDir(), "cache.json"))
 	assert.NoError(t, err)
@@ -150,7 +150,7 @@ func TestResolver_DHTNotFoundIsLookupFailed(t *testing.T) {
 	alicePubBytes, _ := crypto.MarshalPublicKey(rig.alicePub)
 
 	bobFriends := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: rig.aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: rig.aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	cache, err := discovery.OpenCache(filepath.Join(t.TempDir(), "cache.json"))
 	assert.NoError(t, err)
@@ -177,7 +177,7 @@ func TestResolver_StaleCacheFallsThroughToDHT(t *testing.T) {
 	bobPubBytes, _ := crypto.MarshalPublicKey(rig.bobPub)
 	pub, err := discovery.NewPublisher(discovery.PublisherOptions{
 		DHT:             rig.dht,
-		Friends:         &fakeFriendStore{items: []friends.Friend{{Name: "Bob", PeerID: rig.bobID, PublicKey: string(bobPubBytes)}}},
+		Friends:         &fakeFriendStore{items: []friends.Friend{{Name: "Bob", PeerID: rig.bobID, PublicKey: base64.StdEncoding.EncodeToString(bobPubBytes)}}},
 		Signer:          rig.alice,
 		SignerPub:       rig.alicePub,
 		AddressProvider: &fakeAddrs{addrs: []ma.Multiaddr{mustMA(t, "/ip4/198.51.100.7/tcp/4001")}},
@@ -208,7 +208,7 @@ func TestResolver_StaleCacheFallsThroughToDHT(t *testing.T) {
 	assert.Equal(t, []string{"/ip4/203.0.113.99/tcp/4001"}, entry.Addresses)
 
 	bobFriends := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: rig.aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: rig.aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	res, err := discovery.NewResolver(discovery.ResolverOptions{
 		DHT:     rig.dht,
@@ -236,7 +236,7 @@ func TestResolver_InvalidateCache(t *testing.T) {
 	alicePubBytes, _ := crypto.MarshalPublicKey(rig.alicePub)
 
 	bobFriends := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: rig.aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: rig.aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	cache, err := discovery.OpenCache(filepath.Join(t.TempDir(), "cache.json"))
 	assert.NoError(t, err)

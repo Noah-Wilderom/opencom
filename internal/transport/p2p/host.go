@@ -33,14 +33,34 @@ const (
 
 // HostOptions configures a libp2p host construction.
 //
-// The DHT is constructed inside New (wired into libp2p via the Routing
-// option) so that host.NewStream can fall back to a DHT lookup on
-// peerstore cache miss. Callers that want explicit access to the DHT
-// (e.g. for PutValue/GetValue) read it back via Host.DHT().
+// BootstrapPeers and RelayPeers are deliberately separate concerns:
+//   - BootstrapPeers: peers that speak the /opencom/kad/1.0.0 DHT
+//     protocol; used to seed the DHT routing table.
+//   - RelayPeers: peers that run libp2p relay-v2; used by AutoRelay
+//     to obtain circuit-relay reservations so the local host is
+//     reachable from outside its NAT.
+//
+// Production hosts populate both. Tests typically populate neither
+// (empty, non-nil slices) to stay off the public network.
 type HostOptions struct {
-	PrivKey        crypto.PrivKey
-	ListenAddrs    []ma.Multiaddr
+	PrivKey     crypto.PrivKey
+	ListenAddrs []ma.Multiaddr
+
+	// BootstrapPeers seeds the opencom DHT routing table. Default
+	// (nil) is empty — opencom does not yet ship public DHT bootstrap
+	// nodes, so cross-network DHT discovery requires the user to
+	// configure their own. LAN-only deployments use mDNS instead.
 	BootstrapPeers []peer.AddrInfo
+
+	// RelayPeers is the list of libp2p relay-v2 nodes used by
+	// AutoRelay. At least one reachable relay is required for
+	// cross-network reachability when behind NAT. Default (nil) uses
+	// the public libp2p bootstrap nodes (see publicBootstrapAddrs)
+	// which run relay-v2 services.
+	//
+	// Pass an empty (non-nil) slice to disable AutoRelay entirely
+	// (tests).
+	RelayPeers []peer.AddrInfo
 
 	// DHTMode overrides the kad-dht mode. Zero value is dht.ModeAuto,
 	// which is correct for production. Tests on tiny loopback networks
@@ -86,16 +106,26 @@ func New(ctx context.Context, opts HostOptions) (*Host, error) {
 			listen = append(listen, m)
 		}
 	}
-	// nil bootstraps -> fall back to the public IPFS set.
-	// An empty (non-nil) slice means "no bootstraps" (used by tests so the
-	// host stays off the public network).
+	// BootstrapPeers default to empty: opencom does not yet ship its
+	// own DHT bootstrap nodes, and the public IPFS bootstraps speak
+	// /ipfs/kad/1.0.0, not /opencom/kad/1.0.0 — they cannot seed our
+	// routing table. Cross-network DHT discovery requires the user to
+	// configure HostOptions.BootstrapPeers (or cfg.Discovery.Bootstraps)
+	// pointing at opencom-protocol DHT nodes.
 	bootstraps := opts.BootstrapPeers
 	if bootstraps == nil {
-		bs, err := publicBootstrapAddrInfo()
+		bootstraps = nil
+	}
+
+	// RelayPeers default to the public libp2p bootstraps, which run
+	// relay-v2. Empty (non-nil) slice disables AutoRelay (tests).
+	relays := opts.RelayPeers
+	if relays == nil {
+		rs, err := publicBootstrapAddrInfo()
 		if err != nil {
 			return nil, err
 		}
-		bootstraps = bs
+		relays = rs
 	}
 
 	var ddht *dht.IpfsDHT
@@ -139,10 +169,11 @@ func New(ctx context.Context, opts HostOptions) (*Host, error) {
 			return ddht, rerr
 		}),
 	}
-	if len(bootstraps) > 0 {
-		// AutoRelay needs at least one static relay; skip when the caller
-		// explicitly disables bootstraps (tests).
-		libp2pOpts = append(libp2pOpts, libp2p.EnableAutoRelayWithStaticRelays(bootstraps))
+	if len(relays) > 0 {
+		// AutoRelay reserves circuit-relay slots through these peers,
+		// so we get a /p2p-circuit/<relay>/p2p/<our-id> address that
+		// peers behind any NAT can dial.
+		libp2pOpts = append(libp2pOpts, libp2p.EnableAutoRelayWithStaticRelays(relays))
 	}
 	libp2pHost, err := libp2p.New(libp2pOpts...)
 	if err != nil {

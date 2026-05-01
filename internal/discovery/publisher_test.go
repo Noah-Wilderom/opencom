@@ -2,6 +2,7 @@ package discovery_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"sync"
 	"testing"
@@ -86,8 +87,8 @@ func TestPublisher_PublishOnce_OnePerFriend(t *testing.T) {
 	assert.NoError(t, err)
 
 	store := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: aliceID, PublicKey: string(alicePubBytes)},
-		{Name: "Bob", PeerID: bobID, PublicKey: string(bobPubBytes)},
+		{Name: "Alice", PeerID: aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
+		{Name: "Bob", PeerID: bobID, PublicKey: base64.StdEncoding.EncodeToString(bobPubBytes)},
 	}}
 	dht := newFakeDHT()
 	addrs := &fakeAddrs{addrs: []ma.Multiaddr{mustMA(t, "/ip4/192.0.2.1/tcp/4001")}}
@@ -143,7 +144,7 @@ func TestPublisher_Run_StopsOnContextCancel(t *testing.T) {
 	assert.NoError(t, err)
 
 	store := &fakeFriendStore{items: []friends.Friend{
-		{Name: "F", PeerID: friendID, PublicKey: string(friendPubBytes)},
+		{Name: "F", PeerID: friendID, PublicKey: base64.StdEncoding.EncodeToString(friendPubBytes)},
 	}}
 	dht := newFakeDHT()
 	addrs := &fakeAddrs{addrs: []ma.Multiaddr{mustMA(t, "/ip4/192.0.2.1/tcp/4001")}}
@@ -192,7 +193,7 @@ func TestPublisher_PublishOnce_SkipsMalformedFriendPubkey(t *testing.T) {
 	// One friend has a malformed pubkey; another is valid.
 	store := &fakeFriendStore{items: []friends.Friend{
 		{Name: "BadKey", PeerID: peer.ID("bogus"), PublicKey: "garbage"},
-		{Name: "Alice", PeerID: aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	dht := newFakeDHT()
 	addrs := &fakeAddrs{addrs: []ma.Multiaddr{mustMA(t, "/ip4/192.0.2.1/tcp/4001")}}
@@ -225,7 +226,7 @@ func TestPublisher_PublishOnce_LogsAndSkipsDHTPutFailure(t *testing.T) {
 	assert.NoError(t, err)
 
 	store := &fakeFriendStore{items: []friends.Friend{
-		{Name: "Alice", PeerID: aliceID, PublicKey: string(alicePubBytes)},
+		{Name: "Alice", PeerID: aliceID, PublicKey: base64.StdEncoding.EncodeToString(alicePubBytes)},
 	}}
 	dht := newFakeDHT()
 	dht.putErr = errors.New("simulated DHT failure")

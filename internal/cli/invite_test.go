@@ -317,7 +317,7 @@ func TestStatus_RendersConsolidatedView(t *testing.T) {
 
 	s := out.String()
 	assert.Contains(t, s, "12D3KooWG69gneTuz2eVG5QhgPeLay7W2iciaFpJ3L7vzk5jgmTi", "should show peer id")
-	assert.Contains(t, s, "public", "should show reachability")
+	assert.Contains(t, s, "directly reachable", "should show reachability summary")
 	assert.Contains(t, s, "alice", "should show friend names")
 	assert.Contains(t, s, "online")
 	assert.Contains(t, s, "bob")

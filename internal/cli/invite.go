@@ -59,6 +59,16 @@ func newInviteCmd() *cobra.Command {
 				fmt.Fprintf(out, "Share the URL with a friend. They run:\n")
 				fmt.Fprintf(out, "  opencom add '%s'\n", resp.URL)
 			}
+			if len(resp.ReachableAddrs) == 0 {
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "⚠  No cross-network address yet — AutoRelay hasn't reserved a")
+				fmt.Fprintln(out, "   relay slot, and your daemon has no directly-routable public")
+				fmt.Fprintln(out, "   address. The URL above will only work for friends on the")
+				fmt.Fprintln(out, "   same LAN (mDNS) until reachability improves.")
+				fmt.Fprintln(out, "   Run `opencom status` in ~30s; if reachability shows")
+				fmt.Fprintln(out, "   \"directly reachable\" or \"via relay\", re-run `opencom invite`")
+				fmt.Fprintln(out, "   to get a cross-network-redeemable URL.")
+			}
 			return nil
 		},
 	}

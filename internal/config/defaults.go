@@ -39,11 +39,32 @@ type DiscoveryConfig struct {
 	MDNS bool          `yaml:"mdns"`
 	DHT  bool          `yaml:"dht"`
 	TTL  time.Duration `yaml:"ttl"` // DHT registration refresh
+
+	// Bootstraps is the list of opencom-protocol DHT bootstrap peers
+	// (multiaddrs with /p2p/<peer-id> suffix). Used to seed the
+	// /opencom/kad/1.0.0 routing table. Default: empty (until the
+	// project ships its own bootstrap nodes — see M8).
+	//
+	// LAN-only deployments can leave this empty and rely on mDNS.
+	// Cross-network DHT discovery (short-code redemption) requires
+	// at least one reachable opencom bootstrap.
+	Bootstraps []string `yaml:"bootstraps"`
 }
 
-// RelayConfig configures circuit-relay v2 fallback.
+// RelayConfig configures circuit-relay v2: AutoRelay reservations
+// (so peers behind NAT can be reached via a relay) and acting as
+// a relay for friends.
 type RelayConfig struct {
 	Enabled bool `yaml:"enabled"`
+
+	// Peers is the list of relay-v2 nodes the daemon attempts to
+	// reserve circuit-relay slots through (multiaddrs with
+	// /p2p/<peer-id> suffix). At least one reachable relay is
+	// required for cross-network reachability when behind NAT.
+	//
+	// Defaults to libp2p's public bootstrap nodes, which run
+	// relay-v2 services. Self-hosted deployments should override.
+	Peers []string `yaml:"peers"`
 }
 
 // UIConfig configures the TUI and notifications.
@@ -69,6 +90,22 @@ type Config struct {
 	Relay     RelayConfig     `yaml:"relay"`
 	UI        UIConfig        `yaml:"ui"`
 	Daemon    DaemonConfig    `yaml:"daemon"`
+}
+
+// DefaultRelayPeers returns the canonical public libp2p relay-v2 nodes
+// shipped as the default Relay.Peers. These are Protocol Labs' public
+// IPFS bootstrap nodes, which run relay-v2 services as part of being
+// public infrastructure for the libp2p network.
+//
+// Reservation availability is best-effort — these nodes have rate
+// limits. For production deployments, override with self-hosted relays.
+func DefaultRelayPeers() []string {
+	return []string{
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+	}
 }
 
 // Default returns a Config populated with safe defaults. Used as the seed
@@ -106,8 +143,15 @@ func Default() Config {
 			MDNS: true,
 			DHT:  true,
 			TTL:  10 * time.Minute,
+			// Empty until opencom ships its own DHT bootstrap nodes
+			// (M8). Use []string{} (not nil) so YAML round-trips
+			// produce a stable shape.
+			Bootstraps: []string{},
 		},
-		Relay: RelayConfig{Enabled: true},
+		Relay: RelayConfig{
+			Enabled: true,
+			Peers:   DefaultRelayPeers(),
+		},
 		UI: UIConfig{
 			Theme:             "auto",
 			NotificationSound: true,

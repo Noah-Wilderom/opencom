@@ -8,6 +8,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 	"go.uber.org/zap"
 
 	"opencom/internal/call"
@@ -18,6 +19,33 @@ import (
 	"opencom/internal/ipc/methods"
 	"opencom/internal/transport/p2p"
 )
+
+// parseAddrInfoList parses a YAML-configured list of /p2p/-suffixed
+// multiaddrs into peer.AddrInfo. Unparseable entries are logged and
+// skipped — a typo in one peer must not crash the daemon.
+//
+// Returns a non-nil empty slice when all entries fail (or input is
+// empty), so callers can distinguish "user configured empty list"
+// (disable feature) from "default applies" (nil sentinel).
+func parseAddrInfoList(addrs []string, log *zap.Logger, field string) []peer.AddrInfo {
+	out := make([]peer.AddrInfo, 0, len(addrs))
+	for _, s := range addrs {
+		m, err := ma.NewMultiaddr(s)
+		if err != nil {
+			log.Warn("skipping malformed multiaddr in config",
+				zap.String("field", field), zap.String("addr", s), zap.Error(err))
+			continue
+		}
+		info, err := peer.AddrInfoFromP2pAddr(m)
+		if err != nil {
+			log.Warn("skipping multiaddr with no /p2p/ peer-id suffix",
+				zap.String("field", field), zap.String("addr", s), zap.Error(err))
+			continue
+		}
+		out = append(out, *info)
+	}
+	return out
+}
 
 // Run starts the daemon: libp2p host, friends + presence, IPC socket,
 // JSON-RPC server. Runs until ctx is canceled or the daemon.shutdown
@@ -47,21 +75,41 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("opening invite store: %w", err)
 	}
 
+	bootstraps := opts.HostBootstraps
+	if bootstraps == nil {
+		bootstraps = parseAddrInfoList(opts.Config.Discovery.Bootstraps, opts.Log, "discovery.bootstraps")
+	}
+	relays := opts.HostRelays
+	if relays == nil {
+		relays = parseAddrInfoList(opts.Config.Relay.Peers, opts.Log, "relay.peers")
+	}
+
 	host, err := p2p.New(ctx, p2p.HostOptions{
 		PrivKey:        opts.Identity.Priv,
-		BootstrapPeers: opts.HostBootstraps,
+		BootstrapPeers: bootstraps,
+		RelayPeers:     relays,
 	})
 	if err != nil {
 		return fmt.Errorf("constructing libp2p host: %w", err)
 	}
-	// Warn loudly when no opencom-protocol bootstrap peers are configured:
-	// the daemon will only reach peers on the same LAN via mDNS until
-	// HostOptions.BootstrapPeers is populated with opencom nodes. See
-	// internal/transport/p2p/discovery.go for the bootstrap discussion.
-	if len(opts.HostBootstraps) == 0 {
-		opts.Log.Warn("no opencom bootstrap peers configured; cross-network discovery " +
-			"will not work until HostOptions.BootstrapPeers is populated " +
-			"(LAN-only via mDNS until then)")
+	// Two distinct gaps to surface separately:
+	//   - empty DHT bootstraps → short-code (DHT) redemption can't
+	//     traverse cross-network until opencom ships its own DHT
+	//     bootstrap nodes (M8) or the user configures one.
+	//   - empty relay set → AutoRelay can't reserve a circuit, so
+	//     the host has no NAT-traversable address; URL invites then
+	//     only work LAN-to-LAN.
+	if len(bootstraps) == 0 {
+		opts.Log.Info("opencom DHT discovery is disabled (no bootstraps); " +
+			"short codes (OPEN-XXXX-XXXX) only redeem on the same DHT mesh — " +
+			"set discovery.bootstraps in config.yaml to enable cross-network " +
+			"short-code lookup. URL invites continue to work without DHT.")
+	}
+	if len(relays) == 0 {
+		opts.Log.Warn("no relay peers configured (relay.peers); " +
+			"cross-network reachability will fail unless this host has a " +
+			"directly-routable public address. Set relay.peers in config.yaml " +
+			"or rely on the default public libp2p relays.")
 	}
 	defer host.Close()
 
@@ -199,7 +247,17 @@ func Run(ctx context.Context, opts Options) error {
 	server.Register("calls.list", methods.CallsList(callMgr))
 	server.Register("calls.attach", methods.CallsAttach(callMgr))
 	server.Register("calls.action", methods.CallsAction(callEngine, callMgr))
-	server.Register("invite.create", methods.InviteCreate(inviteMgr))
+	// Reachable addrs = public + relay-circuit. Used by `opencom invite`
+	// to warn the user if no cross-network address has been reserved yet.
+	reachableAddrs := func() []string {
+		ms := host.PublicAddrs()
+		out := make([]string, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, m.String())
+		}
+		return out
+	}
+	server.Register("invite.create", methods.InviteCreate(inviteMgr, reachableAddrs))
 	server.Register("invite.list", methods.InviteList(inviteStore))
 	server.Register("invite.revoke", methods.InviteRevoke(inviteMgr))
 	server.Register("invite.redeem", methods.InviteRedeem(inviteMgr))

@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -176,12 +177,19 @@ func (p *Publisher) PublishOnce(ctx context.Context) error {
 }
 
 // unmarshalFriendPubKey decodes a libp2p public key from the format
-// stored in friends.Friend.PublicKey (libp2p protobuf marshaling).
+// stored in friends.Friend.PublicKey: base64(StdEncoding) of the
+// libp2p protobuf-marshaled bytes (matches identity.PublicIdentity's
+// on-wire encoding for `friends add <file>` and the invite manager's
+// post-handshake Add).
 func unmarshalFriendPubKey(s string) (crypto.PubKey, error) {
 	if s == "" {
 		return nil, errors.New("empty public key")
 	}
-	pub, err := crypto.UnmarshalPublicKey([]byte(s))
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("decoding pubkey base64: %w", err)
+	}
+	pub, err := crypto.UnmarshalPublicKey(raw)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal pubkey: %w", err)
 	}

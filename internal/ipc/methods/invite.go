@@ -22,11 +22,17 @@ type InviteCreateParams struct {
 // DHTPublishWarning is empty on success and a human-readable message
 // on best-effort DHT failure. When non-empty, the short Code may not
 // be redeemable until DHT recovers, but URL is always usable.
+//
+// ReachableAddrs lists the host's currently dialable cross-network
+// addresses (publicly-routable addresses + relay-circuit reservations).
+// Empty means the URL likely only works on the same LAN until AutoRelay
+// negotiates a reservation (typically ~30s after startup).
 type InviteCreateResult struct {
-	Code              string `json:"code"`
-	URL               string `json:"url"`
-	ExpiresAt         int64  `json:"expires_at"`
-	DHTPublishWarning string `json:"dht_publish_warning,omitempty"`
+	Code              string   `json:"code"`
+	URL               string   `json:"url"`
+	ExpiresAt         int64    `json:"expires_at"`
+	DHTPublishWarning string   `json:"dht_publish_warning,omitempty"`
+	ReachableAddrs    []string `json:"reachable_addrs,omitempty"`
 }
 
 // InviteListResult is the invite.list response shape.
@@ -66,8 +72,13 @@ type InviteRedeemResult struct {
 }
 
 // InviteCreate generates a fresh invite, publishes it to the DHT, and
-// records it locally. Returns the pretty code, URL form, and expiry.
-func InviteCreate(mgr *invite.Manager) ipc.Handler {
+// records it locally. Returns the pretty code, URL form, expiry, and
+// the host's currently-reachable cross-network addresses (so the CLI
+// can warn if URL invites are LAN-only at the moment).
+//
+// reachableAddrs is a function so the daemon can return live state at
+// invite-creation time rather than the addresses recorded at startup.
+func InviteCreate(mgr *invite.Manager, reachableAddrs func() []string) ipc.Handler {
 	return func(ctx context.Context, raw json.RawMessage) (interface{}, error) {
 		var p InviteCreateParams
 		if len(raw) > 0 {
@@ -87,10 +98,15 @@ func InviteCreate(mgr *invite.Manager) ipc.Handler {
 		if err != nil {
 			return nil, ipc.NewError(ipc.ErrCodeInternalError, err.Error())
 		}
+		var reachable []string
+		if reachableAddrs != nil {
+			reachable = reachableAddrs()
+		}
 		out := InviteCreateResult{
-			Code:      res.Code.Pretty(),
-			URL:       res.URL,
-			ExpiresAt: res.ExpiresAt.Unix(),
+			Code:           res.Code.Pretty(),
+			URL:            res.URL,
+			ExpiresAt:      res.ExpiresAt.Unix(),
+			ReachableAddrs: reachable,
 		}
 		if res.DHTPublishErr != nil {
 			out.DHTPublishWarning = res.DHTPublishErr.Error()
