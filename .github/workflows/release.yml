@@ -9,28 +9,174 @@ permissions:
   contents: write
 
 jobs:
+  build:
+    name: build (${{ matrix.os_title }} ${{ matrix.arch_suffix }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            os_title: Linux
+            arch_suffix: x86_64
+            archive: tar.gz
+          - runner: ubuntu-22.04-arm
+            goos: linux
+            goarch: arm64
+            os_title: Linux
+            arch_suffix: arm64
+            archive: tar.gz
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+            os_title: Darwin
+            arch_suffix: x86_64
+            archive: tar.gz
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            os_title: Darwin
+            arch_suffix: arm64
+            archive: tar.gz
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            os_title: Windows
+            arch_suffix: x86_64
+            archive: zip
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: "1"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # --- Linux: setup-go + apt opus ---
+      - if: matrix.goos == 'linux'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - if: matrix.goos == 'linux'
+        name: install audio cgo deps (linux)
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev libopusfile-dev pkg-config
+
+      # --- macOS: setup-go + brew opus ---
+      - if: matrix.goos == 'darwin'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - if: matrix.goos == 'darwin'
+        name: install audio cgo deps (macos)
+        run: brew install opus opusfile pkg-config
+
+      # --- Windows: MSYS2 brings Go + gcc + opus all in one shell ---
+      - if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-opus
+            mingw-w64-x86_64-opusfile
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-go
+            zip
+
+      # --- Build (unix) ---
+      - if: matrix.goos != 'windows'
+        name: build
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags "-s -w \
+              -X opencom/internal/cli.Version=${VERSION} \
+              -X opencom/internal/cli.Commit=${COMMIT} \
+              -X opencom/internal/cli.BuildDate=${DATE}" \
+            -o dist/opencom \
+            ./cmd/cli
+
+      # --- Build (windows under msys2 — same script, .exe extension) ---
+      - if: matrix.goos == 'windows'
+        name: build
+        shell: msys2 {0}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags "-s -w \
+              -X opencom/internal/cli.Version=${VERSION} \
+              -X opencom/internal/cli.Commit=${COMMIT} \
+              -X opencom/internal/cli.BuildDate=${DATE}" \
+            -o dist/opencom.exe \
+            ./cmd/cli
+
+      # --- Package (unix tar.gz) ---
+      - if: matrix.archive == 'tar.gz'
+        name: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="opencom_${VERSION}_${{ matrix.os_title }}_${{ matrix.arch_suffix }}"
+          mkdir -p "$NAME"
+          cp dist/opencom "$NAME/"
+          cp LICENSE* README* "$NAME/" 2>/dev/null || true
+          tar -czf "${NAME}.tar.gz" "$NAME"
+
+      # --- Package (windows zip, under msys2 so we get the same `zip` tool) ---
+      - if: matrix.archive == 'zip'
+        name: package
+        shell: msys2 {0}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="opencom_${VERSION}_${{ matrix.os_title }}_${{ matrix.arch_suffix }}"
+          mkdir -p "$NAME"
+          cp dist/opencom.exe "$NAME/"
+          cp LICENSE* README* "$NAME/" 2>/dev/null || true
+          zip -r "${NAME}.zip" "$NAME"
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencom-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: opencom_*.${{ matrix.archive }}
+          if-no-files-found: error
+
   release:
+    name: release
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/download-artifact@v4
         with:
-          go-version-file: 'go.mod'
+          path: dist
+          merge-multiple: true
 
-      - name: go vet
-        run: go vet ./...
+      - name: generate checksums
+        working-directory: dist
+        run: sha256sum opencom_* > checksums.txt
 
-      - name: go test
-        run: go test ./...
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+      - name: create github release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*

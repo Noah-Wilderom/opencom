@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -156,6 +157,16 @@ func TestE2E_UnknownMethodReturnsError(t *testing.T) {
 }
 
 func TestE2E_CallFriendFlow(t *testing.T) {
+	// mDNS-via-loopback peer discovery is unreliable on GitHub Actions
+	// macOS runners (multicast on lo0 doesn't propagate the way it does
+	// on Linux), so calls.start fails with "failed to find any peer in
+	// table" before discovery completes. Production code uses both mDNS
+	// and DHT; the test rig here only has mDNS. Skip until the test is
+	// rewritten on top of startRealDaemonWithBootstrap.
+	if runtime.GOOS == "darwin" && os.Getenv("GITHUB_ACTIONS") == "true" {
+		t.Skip("mDNS unreliable on GHA macOS runners; tracked TODO: switch to DHT bootstrap")
+	}
+
 	sockA, peerA, cleanupA := startRealDaemon(t)
 	defer cleanupA()
 	sockB, peerB, cleanupB := startRealDaemon(t)
@@ -262,6 +273,10 @@ func waitForInbound(t *testing.T, c *ipc.Client, _ string, timeout time.Duration
 // the target. Fails the test if the timeout elapses first.
 func expectState(t *testing.T, sub *ipc.Subscription, target string, timeout time.Duration) {
 	t.Helper()
+	if sub == nil {
+		t.Fatalf("expectState called with nil subscription (a prior assert.NoError "+
+			"likely failed without halting); target was %q", target)
+	}
 	deadline := time.After(timeout)
 	for {
 		select {
