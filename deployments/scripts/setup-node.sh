@@ -270,6 +270,7 @@ ui:
   theme: auto
   notification_sound: false
   ringtone: ""
+  notifications: false  # headless server — no display server, no DBus
 daemon:
   autostart: false
   log_level: info

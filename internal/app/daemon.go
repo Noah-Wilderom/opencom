@@ -21,6 +21,7 @@ import (
 	"opencom/internal/invite"
 	"opencom/internal/ipc"
 	"opencom/internal/ipc/methods"
+	"opencom/internal/notify"
 	"opencom/internal/transport/p2p"
 )
 
@@ -294,6 +295,17 @@ func Run(ctx context.Context, opts Options) error {
 		audioMuter = audioMgr
 		audioStatter = audioMgr
 	}
+
+	// Desktop notifications on call state changes (incoming call,
+	// outgoing call, connected, ended). Disabled when ui.notifications
+	// is false — typically on relay/server profiles. Best-effort: a
+	// missing display server (headless Linux without DBus) silently
+	// no-ops via beeep's internal error path.
+	var notifier notify.Notifier = notify.Disabled{}
+	if opts.Config.UI.Notifications {
+		notifier = notify.Beeep{Log: opts.Log.Named("notify")}
+	}
+	go notify.WatchCalls(ctx, callMgr, store, notifier)
 
 	inviteMgr, err := invite.NewManager(invite.ManagerOptions{
 		Host:        host,

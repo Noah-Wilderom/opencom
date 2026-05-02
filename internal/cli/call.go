@@ -40,38 +40,47 @@ func newCallCmd() *cobra.Command {
 	return cmd
 }
 
-// newCallMuteCmd builds `opencom call mute <call-id>`. Sends a one-shot
-// IPC request; the daemon stops transmitting audio for the call and
-// notifies the peer over the audio-control stream.
-func newCallMuteCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "mute <call-id>",
-		Short: "Mute outbound audio for a call",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
-			defer cancel()
-			c, err := dialDaemonOrStart(ctx)
-			if err != nil {
-				return fmt.Errorf("connecting to daemon: %w", err)
+// resolveCallID returns the call ID to act on for action subcommands.
+// When useCurrent is true, it queries calls.list and returns the newest
+// active call by StartedAt — convenient for the common single-call case
+// and unambiguous-enough as a tie-break for the multi-call case.
+// When useCurrent is false, it returns args[0] (caller decides what
+// happens for missing args).
+func resolveCallID(ctx context.Context, c *ipc.Client, args []string, useCurrent bool) (string, error) {
+	if useCurrent {
+		if len(args) > 0 {
+			return "", errors.New("cannot pass both --current and a call ID")
+		}
+		var res methods.CallsListResult
+		if err := c.Call(ctx, "calls.list", nil, &res); err != nil {
+			return "", fmt.Errorf("listing calls: %w", err)
+		}
+		if len(res.Calls) == 0 {
+			return "", errors.New("no active calls")
+		}
+		newest := res.Calls[0]
+		for _, e := range res.Calls[1:] {
+			if e.StartedAt.After(newest.StartedAt) {
+				newest = e
 			}
-			defer c.Close()
-			if err := c.Call(ctx, "calls.action",
-				methods.CallsActionParams{CallID: args[0], Action: "mute"}, nil); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Muted %s\n", args[0])
-			return nil
-		},
+		}
+		return newest.CallID, nil
 	}
+	if len(args) == 0 {
+		return "", errors.New("call id required (or pass --current)")
+	}
+	return args[0], nil
 }
 
-// newCallUnmuteCmd builds `opencom call unmute <call-id>`.
-func newCallUnmuteCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "unmute <call-id>",
-		Short: "Unmute outbound audio for a call",
-		Args:  cobra.ExactArgs(1),
+// newCallMuteCmd builds `opencom call mute <call-id>` (or `--current`).
+// Sends a one-shot IPC request; the daemon stops transmitting audio for
+// the call and notifies the peer over the audio-control stream.
+func newCallMuteCmd() *cobra.Command {
+	var useCurrent bool
+	cmd := &cobra.Command{
+		Use:   "mute [<call-id>]",
+		Short: "Mute outbound audio for a call",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
@@ -80,14 +89,53 @@ func newCallUnmuteCmd() *cobra.Command {
 				return fmt.Errorf("connecting to daemon: %w", err)
 			}
 			defer c.Close()
-			if err := c.Call(ctx, "calls.action",
-				methods.CallsActionParams{CallID: args[0], Action: "unmute"}, nil); err != nil {
+			callID, err := resolveCallID(ctx, c, args, useCurrent)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Unmuted %s\n", args[0])
+			if err := c.Call(ctx, "calls.action",
+				methods.CallsActionParams{CallID: callID, Action: "mute"}, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Muted %s\n", callID)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&useCurrent, "current", false,
+		"act on the newest active call instead of requiring a call ID")
+	return cmd
+}
+
+// newCallUnmuteCmd builds `opencom call unmute <call-id>` (or `--current`).
+func newCallUnmuteCmd() *cobra.Command {
+	var useCurrent bool
+	cmd := &cobra.Command{
+		Use:   "unmute [<call-id>]",
+		Short: "Unmute outbound audio for a call",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			defer cancel()
+			c, err := dialDaemonOrStart(ctx)
+			if err != nil {
+				return fmt.Errorf("connecting to daemon: %w", err)
+			}
+			defer c.Close()
+			callID, err := resolveCallID(ctx, c, args, useCurrent)
+			if err != nil {
+				return err
+			}
+			if err := c.Call(ctx, "calls.action",
+				methods.CallsActionParams{CallID: callID, Action: "unmute"}, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Unmuted %s\n", callID)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&useCurrent, "current", false,
+		"act on the newest active call instead of requiring a call ID")
+	return cmd
 }
 
 func runCallStart(cmd *cobra.Command, target string, background bool) error {
@@ -271,18 +319,25 @@ func newCallListCmd() *cobra.Command {
 }
 
 func newCallAcceptCmd() *cobra.Command {
-	var background bool
+	var background, useCurrent bool
 	cmd := &cobra.Command{
-		Use:   "accept <call-id>",
-		Short: "Accept an inbound call (foreground; Ctrl+C hangs up). Use --background to detach.",
-		Args:  cobra.ExactArgs(1),
+		Use:   "accept [<call-id>]",
+		Short: "Accept an inbound call (foreground; Ctrl+C hangs up). Use --background to detach or --current for the newest call.",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			callID := args[0]
 			out := cmd.OutOrStdout()
 
 			c, err := dialDaemonOrStart(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("connecting to daemon: %w", err)
+			}
+
+			rctx, rcancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			callID, err := resolveCallID(rctx, c, args, useCurrent)
+			rcancel()
+			if err != nil {
+				c.Close()
+				return err
 			}
 
 			if background {
@@ -325,6 +380,8 @@ func newCallAcceptCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&background, "background", false,
 		"send accept and exit; the call lives in the daemon. "+
 			"Re-attach later with `opencom call attach <call-id>`")
+	cmd.Flags().BoolVar(&useCurrent, "current", false,
+		"accept the newest active call instead of requiring a call ID")
 	return cmd
 }
 
@@ -354,10 +411,11 @@ func newCallAttachCmd() *cobra.Command {
 
 func newCallHangupCmd() *cobra.Command {
 	var reason string
+	var useCurrent bool
 	cmd := &cobra.Command{
-		Use:   "hangup <call-id>",
+		Use:   "hangup [<call-id>]",
 		Short: "Hang up a call",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
@@ -366,14 +424,20 @@ func newCallHangupCmd() *cobra.Command {
 				return fmt.Errorf("connecting to daemon: %w", err)
 			}
 			defer c.Close()
-			if err := c.Call(ctx, "calls.action",
-				methods.CallsActionParams{CallID: args[0], Action: "hangup", Reason: reason}, nil); err != nil {
+			callID, err := resolveCallID(ctx, c, args, useCurrent)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Hung up %s\n", args[0])
+			if err := c.Call(ctx, "calls.action",
+				methods.CallsActionParams{CallID: callID, Action: "hangup", Reason: reason}, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Hung up %s\n", callID)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "user requested", "reason string sent to peer")
+	cmd.Flags().BoolVar(&useCurrent, "current", false,
+		"hang up the newest active call instead of requiring a call ID")
 	return cmd
 }

@@ -169,6 +169,28 @@ func TestCallList_PrintsEmptyWhenNoCalls(t *testing.T) {
 	assert.Contains(t, out.String(), "no active calls")
 }
 
+// TestCallHangup_CurrentFlagPicksNewest proves that `--current` (no
+// positional arg) resolves to the newest active call when multiple
+// exist. We register two sessions on the rig's call manager — the
+// later-registered one must be the one hung up.
+func TestCallHangup_CurrentFlagFailsWhenNoCalls(t *testing.T) {
+	withTempPaths(t)
+
+	store, err := friends.Open(filepath.Join(t.TempDir(), "friends.json"))
+	assert.NoError(t, err)
+	_, _, _, cleanup := startCallsServerForCLI(t, store)
+	defer cleanup()
+
+	root := cli.NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"call", "hangup", "--current"})
+	err = root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no active calls")
+}
+
 func TestCallHangup_NoSuchCall(t *testing.T) {
 	withTempPaths(t)
 

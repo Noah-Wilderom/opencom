@@ -101,6 +101,12 @@ type UIConfig struct {
 	Theme             string `yaml:"theme"` // "dark" | "light" | "auto"
 	NotificationSound bool   `yaml:"notification_sound"`
 	Ringtone          string `yaml:"ringtone"` // path; "" = use embedded default
+
+	// Notifications enables desktop notifications on call state changes
+	// (incoming, outgoing, connected, ended). Default true. Set to false
+	// on relay/server profiles where there's no display server — beeep
+	// would log a debug error per event otherwise.
+	Notifications bool `yaml:"notifications"`
 }
 
 // DaemonConfig configures the daemon process itself.
@@ -212,6 +218,7 @@ func Default() Config {
 			Theme:             "auto",
 			NotificationSound: true,
 			Ringtone:          "",
+			Notifications:     true,
 		},
 		Daemon: DaemonConfig{
 			Autostart: false,

@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -38,6 +39,23 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/quic-go/quic-go"
 )
+
+// WaitForDatagramConnTimeout bounds how long NewLibp2pTransport will wait
+// for a direct QUIC connection to appear before giving up. When two peers
+// can only reach each other via libp2p's circuit relay (cross-network,
+// behind NAT), the initial Connect succeeds via /p2p-circuit but no QUIC
+// datagrams traverse the relay. libp2p's DCUtR (hole-punching) then runs
+// in the background and, when both NATs cooperate, upgrades the relay
+// path to a direct QUIC connection. This timeout gives DCUtR enough time
+// to complete one full attempt; 8s is conservative for typical home NATs
+// and still bounds the worst case (symmetric-NAT-on-both-sides → unfix‑
+// able) from blocking call setup indefinitely.
+const WaitForDatagramConnTimeout = 8 * time.Second
+
+// datagramPollInterval is how often waitForDatagramConn re-checks the
+// connection set while waiting. Short enough that DCUtR success is picked
+// up promptly; not so short it busy-loops.
+const datagramPollInterval = 100 * time.Millisecond
 
 // AudioControlProtocol is the libp2p stream protocol for audio control messages.
 const AudioControlProtocol = protocol.ID("/opencom/audio-control/1.0.0")
@@ -140,7 +158,8 @@ type libp2pTransport struct {
 // NewLibp2pTransport creates a Transport to peer p using host h.
 //
 // Prerequisites:
-//  1. h must have at least one QUIC v1 connection to p (for datagrams).
+//  1. h must have at least one QUIC v1 connection to p (for datagrams),
+//     or be able to obtain one via DCUtR within WaitForDatagramConnTimeout.
 //  2. RegisterStreamHandler must have been called on h so inbound control
 //     streams from p are delivered to the per-peer channel.
 //
@@ -149,10 +168,14 @@ type libp2pTransport struct {
 // appear in h's inbound channel. Both sides open their stream concurrently so
 // there is no deadlock when the caller calls NewLibp2pTransport for A then B.
 //
-// Returns ErrDatagramsUnavailable if no QUIC connection is found.
+// Returns ErrDatagramsUnavailable if no QUIC connection appears within
+// WaitForDatagramConnTimeout (typical when peers are behind symmetric NATs
+// that DCUtR can't hole-punch through).
 func NewLibp2pTransport(ctx context.Context, h host.Host, p peer.ID) (Transport, error) {
-	// 1. Find a QUIC datagram-capable connection.
-	dconn, err := findDatagramConn(h, p)
+	// 1. Find a QUIC datagram-capable connection. This blocks up to
+	//    WaitForDatagramConnTimeout to give DCUtR a chance to upgrade
+	//    a relay-only connection to direct QUIC.
+	dconn, err := waitForDatagramConn(ctx, h, p, WaitForDatagramConnTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +204,37 @@ func NewLibp2pTransport(ctx context.Context, h host.Host, p peer.ID) (Transport,
 	go t.waitAndReadControlLoop(inCh)
 
 	return t, nil
+}
+
+// waitForDatagramConn polls findDatagramConn until either a direct QUIC
+// connection appears, ctx is cancelled, or timeout elapses. The poll
+// interval (datagramPollInterval) is short enough that DCUtR success is
+// noticed promptly; libp2p does not currently expose a "datagram-capable
+// connection added" event, so polling is the most portable signal.
+//
+// Returns the underlying datagram connection on success, ctx.Err() if
+// the caller's context is cancelled, or ErrDatagramsUnavailable on
+// timeout.
+func waitForDatagramConn(ctx context.Context, h host.Host, p peer.ID, timeout time.Duration) (datagramConn, error) {
+	if dconn, err := findDatagramConn(h, p); err == nil {
+		return dconn, nil
+	}
+	deadline := time.Now().Add(timeout)
+	tick := time.NewTicker(datagramPollInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-tick.C:
+			if dconn, err := findDatagramConn(h, p); err == nil {
+				return dconn, nil
+			}
+			if time.Now().After(deadline) {
+				return nil, ErrDatagramsUnavailable
+			}
+		}
+	}
 }
 
 // findDatagramConn iterates the live connections to p and returns the first
