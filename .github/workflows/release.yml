@@ -93,7 +93,7 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          COMMIT="$(git rev-parse --short HEAD)"
+          COMMIT="${GITHUB_SHA:0:7}"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p dist
           go build \
@@ -111,7 +111,7 @@ jobs:
         shell: msys2 {0}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          COMMIT="$(git rev-parse --short HEAD)"
+          COMMIT="${GITHUB_SHA:0:7}"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p dist
           go build \

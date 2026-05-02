@@ -67,6 +67,10 @@ func TestDaemonHelp_DescribesSubcommands(t *testing.T) {
 // startInProcessServer launches an ipc.Server on the path that
 // config.DefaultPaths().SocketPath resolves to inside this test's withTempPaths
 // scope. It returns a function the test can call to stop and clean up.
+//
+// Test fixture is unix-socket-based; on Windows the production code uses
+// go-winio named pipes, which this helper does not stand up. Callers
+// must skipIfWindowsNoUnixSockets before invoking.
 func startInProcessServer(t *testing.T, kp identity.Keypair, version string, startedAt time.Time) func() {
 	t.Helper()
 	root := os.Getenv("XDG_RUNTIME_DIR")
@@ -90,6 +94,7 @@ func startInProcessServer(t *testing.T, kp identity.Keypair, version string, sta
 }
 
 func TestDaemonStatus_PrintsRunningWhenDaemonAlive(t *testing.T) {
+	skipIfWindowsNoUnixSockets(t)
 	withTempPaths(t)
 
 	kp, err := identity.Generate()
@@ -124,6 +129,7 @@ func TestDaemonStatus_PrintsNotRunningWhenSocketAbsent(t *testing.T) {
 }
 
 func TestDaemonStop_PrintsStoppingAndCancelsServer(t *testing.T) {
+	skipIfWindowsNoUnixSockets(t)
 	withTempPaths(t)
 
 	root := os.Getenv("XDG_RUNTIME_DIR")
