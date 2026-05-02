@@ -100,13 +100,28 @@ func (e *Engine) Stop() {
 // Place dials remote, opens a fresh control stream, sends INVITE, registers
 // the new Outbound Session, and starts the read loop. Returns the Session
 // in StateRinging.
+//
+// Dial strategy:
+//  1. Consult Resolver (cache → DHT) for current addresses; merge into peerstore.
+//  2. Try NewStream.
+//  3. If NewStream fails (commonly: peer moved networks, relay reservation
+//     expired, peerstore has only stale entries from a prior session), force
+//     a fresh DHT lookup by invalidating the resolver cache, repopulate the
+//     peerstore, and retry NewStream once.
+//
+// One bounded retry — not a loop — keeps Place latency predictable while
+// catching the common stale-address case without making the user re-issue
+// `opencom call`.
 func (e *Engine) Place(ctx context.Context, remote peer.ID) (*Session, error) {
-	if e.resolver != nil {
-		if addrs, rerr := e.resolver.Resolve(ctx, remote); rerr == nil && len(addrs) > 0 {
-			e.host.HostInternal().Peerstore().AddAddrs(remote, addrs, peerstore.TempAddrTTL)
+	e.populatePeerstoreFromResolver(ctx, remote, false)
+	stream, err := e.host.HostInternal().NewStream(ctx, remote, ProtocolID)
+	if err != nil && e.resolver != nil {
+		e.log.Debug("first dial failed; forcing fresh DHT lookup and retrying",
+			zap.String("peer", remote.String()), zap.Error(err))
+		if e.populatePeerstoreFromResolver(ctx, remote, true) {
+			stream, err = e.host.HostInternal().NewStream(ctx, remote, ProtocolID)
 		}
 	}
-	stream, err := e.host.HostInternal().NewStream(ctx, remote, ProtocolID)
 	if err != nil {
 		if e.resolver != nil {
 			e.resolver.InvalidateCache(remote)
@@ -135,6 +150,36 @@ func (e *Engine) Place(ctx context.Context, remote peer.ID) (*Session, error) {
 	}
 	go e.readLoop(s)
 	return s, nil
+}
+
+// populatePeerstoreFromResolver consults the Resolver and merges any
+// returned addresses into the libp2p peerstore. Returns true iff the
+// peerstore actually gained addresses (i.e. the Resolver succeeded and
+// returned a non-empty list).
+//
+// When forceFresh is true, the resolver's disk cache is invalidated
+// first so the lookup goes to the DHT — used by Place's retry path
+// after a stale-address dial failure. forceFresh is a no-op when no
+// Resolver is configured.
+func (e *Engine) populatePeerstoreFromResolver(ctx context.Context, remote peer.ID, forceFresh bool) bool {
+	if e.resolver == nil {
+		return false
+	}
+	if forceFresh {
+		e.resolver.InvalidateCache(remote)
+	}
+	addrs, err := e.resolver.Resolve(ctx, remote)
+	if err != nil || len(addrs) == 0 {
+		if err != nil {
+			e.log.Debug("resolver lookup failed",
+				zap.String("peer", remote.String()),
+				zap.Bool("force_fresh", forceFresh),
+				zap.Error(err))
+		}
+		return false
+	}
+	e.host.HostInternal().Peerstore().AddAddrs(remote, addrs, peerstore.TempAddrTTL)
+	return true
 }
 
 // Accept sends ACCEPT for an inbound Session, advancing it to Connecting

@@ -201,17 +201,79 @@ func TestEngine_IgnoresCallIDMismatch(t *testing.T) {
 }
 
 // fakeResolver records Resolve calls and returns canned addresses.
+// If addrsByCall is non-nil, it overrides addrs and the n-th Resolve
+// returns addrsByCall[n] (clamped to the last entry); used to simulate
+// "stale on first lookup, fresh on retry".
 type fakeResolver struct {
 	calls       int
 	invalidated peer.ID
 	addrs       []ma.Multiaddr
+	addrsByCall [][]ma.Multiaddr
 }
 
 func (f *fakeResolver) Resolve(_ context.Context, target peer.ID) ([]ma.Multiaddr, error) {
+	idx := f.calls
 	f.calls++
+	if f.addrsByCall != nil {
+		if idx >= len(f.addrsByCall) {
+			idx = len(f.addrsByCall) - 1
+		}
+		return f.addrsByCall[idx], nil
+	}
 	return f.addrs, nil
 }
 func (f *fakeResolver) InvalidateCache(target peer.ID) { f.invalidated = target }
+
+// TestEngine_PlaceRefreshesAddressesOnDialFailure proves the
+// stale-address recovery path: when the first NewStream attempt fails,
+// the resolver's cache is invalidated and a fresh lookup is performed
+// before the dial is retried. Without this, peers that have moved
+// networks (or whose relay reservation expired) require the user to
+// manually re-issue `opencom call`.
+func TestEngine_PlaceRefreshesAddressesOnDialFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Two unconnected hosts; A's peerstore knows nothing about B.
+	kpA, err := identity.Generate()
+	assert.NoError(t, err)
+	kpB, err := identity.Generate()
+	assert.NoError(t, err)
+	hA, err := p2p.New(ctx, p2p.HostOptions{PrivKey: kpA.Priv})
+	assert.NoError(t, err)
+	t.Cleanup(func() { hA.Close() })
+	hB, err := p2p.New(ctx, p2p.HostOptions{PrivKey: kpB.Priv})
+	assert.NoError(t, err)
+	t.Cleanup(func() { hB.Close() })
+
+	mA := call.NewManager()
+	mB := call.NewManager()
+	eA := call.NewEngine(hA, mA, zap.NewNop(), time.Now)
+	eB := call.NewEngine(hB, mB, zap.NewNop(), time.Now)
+	eA.Start()
+	eB.Start()
+
+	bInfo, err := p2p.HostAddrInfo(hB)
+	assert.NoError(t, err)
+
+	// First Resolve returns no addrs (stale-cache scenario: nothing
+	// usable). Second Resolve (post-failure, post-invalidate) returns
+	// B's real addresses so the retry can connect.
+	r := &fakeResolver{addrsByCall: [][]ma.Multiaddr{
+		{},          // call 1: stale/empty → first NewStream fails
+		bInfo.Addrs, // call 2: fresh from DHT → retry succeeds
+	}}
+	eA.SetResolver(r)
+
+	out, err := eA.Place(ctx, hB.ID())
+	assert.NoError(t, err, "Place should succeed via the retry path")
+	assert.NotNil(t, out)
+
+	assert.Equal(t, 2, r.calls, "resolver must be consulted twice (initial + post-failure refresh)")
+	assert.Equal(t, hB.ID(), r.invalidated, "resolver cache must be invalidated for the target between attempts")
+}
 
 func TestEngine_PlaceConsultsResolverBeforeDial(t *testing.T) {
 	t.Parallel()
