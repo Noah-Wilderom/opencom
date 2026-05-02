@@ -276,6 +276,46 @@ func looksLikePeerID(s string) bool {
 	return false
 }
 
+// CallsSubscribeResult is the calls.subscribe response shape: a
+// short subscription ID the caller can correlate with subsequent
+// "call_state" events.
+type CallsSubscribeResult struct {
+	SubscriptionID string `json:"subscription_id"`
+}
+
+// CallsSubscribe registers a long-running subscription that emits
+// every call.StateChange the call manager observes — across all
+// active sessions, not just one. Used by the TUI to drive both the
+// friends sidebar's per-friend "on call" badge and the call dock's
+// state machine with one IPC subscription.
+func CallsSubscribe(mgr *call.Manager) ipc.Handler {
+	return func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		conn := ipc.ConnFromContext(ctx)
+		if conn == nil {
+			return nil, ipc.NewError(ipc.ErrCodeInternalError, "calls.subscribe requires a connection context")
+		}
+		subID := newSubscriptionID()
+		events := mgr.SubscribeStateChanges()
+
+		go func() {
+			defer mgr.UnsubscribeStateChanges(events)
+			for {
+				select {
+				case <-conn.Done():
+					return
+				case ev, ok := <-events:
+					if !ok {
+						return
+					}
+					_ = conn.EmitEvent(subID, "call_state", ev)
+				}
+			}
+		}()
+
+		return CallsSubscribeResult{SubscriptionID: subID}, nil
+	}
+}
+
 // pipeStateChanges forwards Session state-change events to the IPC
 // connection until the session ends or the connection closes. A synthetic
 // state-change reflecting the current state is emitted first so a caller

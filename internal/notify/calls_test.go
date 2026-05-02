@@ -99,7 +99,7 @@ func TestWatchCalls_FiresOnStateChange(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		notify.WatchCalls(ctx, src, names, rec)
+		notify.WatchCalls(ctx, src, names, rec, nil)
 		close(done)
 	}()
 

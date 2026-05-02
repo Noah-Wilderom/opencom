@@ -19,21 +19,29 @@ type Notifier interface {
 	Notify(title, body string)
 }
 
-// Beeep is the production Notifier. Errors from beeep — common on
-// headless Linux without a session bus, and on systems where
-// terminal-notifier isn't installed on macOS — are logged at debug
-// level and never surfaced.
+// Beeep is the production Notifier. Successful notifies log at info;
+// failures log at warn so users can see why notifications aren't
+// appearing without flipping the daemon's log level.
 type Beeep struct {
 	Log *zap.Logger
 }
 
 // Notify implements Notifier.
 func (b Beeep) Notify(title, body string) {
-	if err := beeep.Notify(title, body, nil); err != nil && b.Log != nil {
-		b.Log.Debug("desktop notification failed",
-			zap.String("title", title),
-			zap.Error(err))
+	err := beeep.Notify(title, body, nil)
+	if b.Log == nil {
+		return
 	}
+	if err != nil {
+		b.Log.Warn("desktop notification failed",
+			zap.String("title", title),
+			zap.String("body", body),
+			zap.Error(err))
+		return
+	}
+	b.Log.Info("desktop notification sent",
+		zap.String("title", title),
+		zap.String("body", body))
 }
 
 // Disabled is a no-op Notifier. Inject it when ui.notifications=false

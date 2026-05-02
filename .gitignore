@@ -5,6 +5,7 @@
 
 .claude/
 docs/
+.superpowers
 
 # Added by goreleaser init:
 dist/

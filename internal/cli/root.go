@@ -30,6 +30,12 @@ and require no operator-controlled infrastructure.`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			maybePrintUpgradeAvailable(cmd)
 		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return cmd.Help()
+			}
+			return runTUI()
+		},
 	}
 
 	root.AddCommand(newVersionCmd())

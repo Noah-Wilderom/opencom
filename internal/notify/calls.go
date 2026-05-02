@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"go.uber.org/zap"
 
 	"opencom/internal/call"
 	"opencom/internal/friends"
@@ -31,9 +32,18 @@ type CallSource interface {
 // Spawn this as a goroutine alongside audio.Manager.Start in daemon
 // startup. Notifier may be Disabled to skip every event without
 // changing the call-graph.
-func WatchCalls(ctx context.Context, src CallSource, names FriendNamer, n Notifier) {
+//
+// log is optional — when non-nil, the watcher emits info-level
+// breadcrumbs at startup and on every state-change event so users
+// debugging missing notifications can see whether the watcher is
+// even receiving events vs. whether the Notifier is silently no-oping.
+func WatchCalls(ctx context.Context, src CallSource, names FriendNamer, n Notifier, log *zap.Logger) {
 	events := src.SubscribeStateChanges()
 	defer src.UnsubscribeStateChanges(events)
+	if log != nil {
+		log.Info("notify: watching call state changes")
+		defer log.Info("notify: watcher exiting")
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -43,6 +53,13 @@ func WatchCalls(ctx context.Context, src CallSource, names FriendNamer, n Notifi
 				return
 			}
 			title, body := formatNotification(ev, names)
+			if log != nil {
+				log.Info("notify: received call event",
+					zap.String("state", ev.State),
+					zap.String("direction", ev.Direction),
+					zap.String("session", ev.SessionID),
+					zap.String("notify_title", title))
+			}
 			if title == "" {
 				continue
 			}

@@ -319,7 +319,7 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Config.UI.Notifications {
 		notifier = notify.Beeep{Log: opts.Log.Named("notify")}
 	}
-	go notify.WatchCalls(ctx, callMgr, store, notifier)
+	go notify.WatchCalls(ctx, callMgr, store, notifier, opts.Log.Named("notify"))
 
 	inviteMgr, err := invite.NewManager(invite.ManagerOptions{
 		Host:        host,
@@ -408,6 +408,7 @@ func Run(ctx context.Context, opts Options) error {
 	server.Register("calls.list", methods.CallsList(callMgr, audioStatter))
 	server.Register("calls.attach", methods.CallsAttach(callMgr))
 	server.Register("calls.action", methods.CallsAction(callEngine, callMgr, audioMuter))
+	server.Register("calls.subscribe", methods.CallsSubscribe(callMgr))
 	// Reachable addrs = public + relay-circuit. Used by `opencom invite`
 	// to warn the user if no cross-network address has been reserved yet.
 	reachableAddrs := func() []string {
