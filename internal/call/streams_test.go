@@ -3,6 +3,7 @@ package call_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,6 +275,70 @@ func TestEngine_PlaceRefreshesAddressesOnDialFailure(t *testing.T) {
 
 	assert.Equal(t, 2, r.calls, "resolver must be consulted twice (initial + post-failure refresh)")
 	assert.Equal(t, hB.ID(), r.invalidated, "resolver cache must be invalidated for the target between attempts")
+}
+
+// TestEngine_PlaceAddsRelayCircuitFallback proves that when relays are
+// configured via SetRelays, Place adds /<relay>/p2p-circuit dial
+// candidates to the peerstore for the target before NewStream — even
+// if the resolver returns nothing. Without this, libp2p has no way to
+// reach a NAT'd peer it doesn't already have a fresh address for.
+func TestEngine_PlaceAddsRelayCircuitFallback(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Three hosts: A (caller), B (target/callee), R (relay).
+	kpA, _ := identity.Generate()
+	kpB, _ := identity.Generate()
+	kpR, _ := identity.Generate()
+
+	hR, err := p2p.New(ctx, p2p.HostOptions{PrivKey: kpR.Priv})
+	assert.NoError(t, err)
+	t.Cleanup(func() { hR.Close() })
+	hA, err := p2p.New(ctx, p2p.HostOptions{PrivKey: kpA.Priv})
+	assert.NoError(t, err)
+	t.Cleanup(func() { hA.Close() })
+	hB, err := p2p.New(ctx, p2p.HostOptions{PrivKey: kpB.Priv})
+	assert.NoError(t, err)
+	t.Cleanup(func() { hB.Close() })
+
+	relayInfo, err := p2p.HostAddrInfo(hR)
+	assert.NoError(t, err)
+
+	// Wire up engines but DO NOT pre-connect A↔B. We're only proving
+	// that the fallback addresses get into A's peerstore — not that
+	// the full circuit dial succeeds (that needs relay-v2 service
+	// configured, which is a separate test surface).
+	mA := call.NewManager()
+	mB := call.NewManager()
+	eA := call.NewEngine(hA, mA, zap.NewNop(), time.Now)
+	eB := call.NewEngine(hB, mB, zap.NewNop(), time.Now)
+	eA.SetRelays([]peer.AddrInfo{relayInfo})
+	eA.Start()
+	eB.Start()
+
+	// Try to place. Will fail (no real circuit), but we don't care
+	// about success — just that the peerstore got the fallback addrs.
+	pctx, pcancel := context.WithTimeout(ctx, 1*time.Second)
+	_, _ = eA.Place(pctx, hB.ID())
+	pcancel()
+
+	// Inspect A's peerstore for B: it should now contain at least one
+	// /p2p-circuit/ address pointing through R.
+	addrs := hA.HostInternal().Peerstore().Addrs(hB.ID())
+	var sawCircuitViaRelay bool
+	for _, a := range addrs {
+		s := a.String()
+		if !strings.Contains(s, "p2p-circuit") {
+			continue
+		}
+		if strings.Contains(s, relayInfo.ID.String()) {
+			sawCircuitViaRelay = true
+			break
+		}
+	}
+	assert.True(t, sawCircuitViaRelay,
+		"peerstore should contain a /<relay>/p2p-circuit address for the target after Place; got %v", addrs)
 }
 
 // TestTranslateDialError_RewritesNoReservation proves that a libp2p

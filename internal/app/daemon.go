@@ -254,6 +254,13 @@ func Run(ctx context.Context, opts Options) error {
 	callMgr := call.NewManager()
 	callEngine := call.NewEngine(host, callMgr, opts.Log, nil)
 	callEngine.SetResolver(resolver)
+	// Hand the engine the same relay list AutoRelay uses so Place can
+	// add /<relay>/p2p-circuit fallback addresses to the peerstore for
+	// the dial target. Without this, libp2p only tries whatever direct
+	// addresses it cached, which are typically stale or LAN-only after
+	// a daemon restart, and the call times out without ever attempting
+	// the relay path.
+	callEngine.SetRelays(relays)
 	callEngine.Start()
 	defer callEngine.Stop()
 

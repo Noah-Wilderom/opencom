@@ -360,7 +360,13 @@ func startRealDaemonWithBootstrap(t *testing.T, bootstraps []peer.AddrInfo) (soc
 			StartedAt:      time.Now().UTC(),
 			DisableMDNS:    true,
 			HostBootstraps: bootstraps,
-			DisableAudio:   true,
+			// Empty (non-nil) to disable AutoRelay AND short-circuit
+			// the engine's relay-circuit fallback. Without this, Place
+			// would inject the production relay's dns6 addrs into the
+			// dial set; AAAA lookups in CI with no IPv6 hang for ~75s
+			// and the call times out.
+			HostRelays:   []peer.AddrInfo{},
+			DisableAudio: true,
 		})
 		close(done)
 	}()

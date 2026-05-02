@@ -47,12 +47,22 @@ type Engine struct {
 	encs    map[string]*json.Encoder
 
 	resolver Resolver
+	relays   []peer.AddrInfo // for circuit-relay fallback in Place
 }
 
 // SetResolver installs r so subsequent Place calls consult it before
 // dialing. Safe to call once at daemon startup; not thread-safe to
 // call concurrently with Place.
 func (e *Engine) SetResolver(r Resolver) { e.resolver = r }
+
+// SetRelays installs the configured circuit-relay peers. Place uses
+// them to populate the peerstore with /<relay>/p2p-circuit fallback
+// addresses for the target so libp2p has a guaranteed try-via-relay
+// path even when the resolver/peerstore has no fresh direct addrs
+// (the dominant cross-network failure mode while opencom's DHT layer
+// is still flaky). Safe to call once at daemon startup; not
+// thread-safe to call concurrently with Place.
+func (e *Engine) SetRelays(relays []peer.AddrInfo) { e.relays = relays }
 
 // NewEngine constructs an Engine ready to be Start()ed.
 func NewEngine(h *p2p.Host, m *Manager, log *zap.Logger, now func() time.Time) *Engine {
@@ -115,6 +125,7 @@ func (e *Engine) Stop() {
 // `opencom call`.
 func (e *Engine) Place(ctx context.Context, remote peer.ID) (*Session, error) {
 	e.populatePeerstoreFromResolver(ctx, remote, false)
+	e.populatePeerstoreWithRelayFallback(remote)
 	stream, err := e.host.HostInternal().NewStream(ctx, remote, ProtocolID)
 	if err != nil && e.resolver != nil {
 		e.log.Debug("first dial failed; forcing fresh DHT lookup and retrying",
@@ -174,6 +185,42 @@ func translateDialError(remote peer.ID, err error) error {
 	return fmt.Errorf("peer %s has no relay reservation — they may need to "+
 		"restart their daemon or their network is blocking AutoRelay "+
 		"(original: %w)", remote, err)
+}
+
+// populatePeerstoreWithRelayFallback adds /<relay>/p2p-circuit dial
+// candidates for target into the peerstore — but ONLY when the
+// peerstore has no fresh addresses already. The point is to give a
+// stranded peer (cached addrs expired, DHT lookup failed) a guaranteed
+// try-via-relay path; we deliberately skip when libp2p already has
+// good data, both to avoid pointless extra dials and to avoid
+// suppressing a working direct path with a slow/unreachable relay.
+//
+// Safe to call repeatedly: AddAddr is additive and TempAddrTTL ensures
+// the entries don't accumulate forever in the peerstore.
+//
+// No-op when no relays are configured (test rigs, custom deployments).
+func (e *Engine) populatePeerstoreWithRelayFallback(target peer.ID) {
+	if len(e.relays) == 0 {
+		return
+	}
+	pstore := e.host.HostInternal().Peerstore()
+	if len(pstore.Addrs(target)) > 0 {
+		return
+	}
+	circuit, err := ma.NewMultiaddr("/p2p-circuit")
+	if err != nil {
+		return
+	}
+	for _, relay := range e.relays {
+		relayP2P, err := ma.NewMultiaddr("/p2p/" + relay.ID.String())
+		if err != nil {
+			continue
+		}
+		for _, addr := range relay.Addrs {
+			full := addr.Encapsulate(relayP2P).Encapsulate(circuit)
+			pstore.AddAddr(target, full, peerstore.TempAddrTTL)
+		}
+	}
 }
 
 // populatePeerstoreFromResolver consults the Resolver and merges any
