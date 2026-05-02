@@ -269,6 +269,9 @@ discovery:
 relay:
   enabled: true
   peers: []         # this node IS a relay; doesn't need to reserve through others
+  unlimited: true   # remove libp2p's 128 KiB / 2 min per-circuit cap; this
+                    # is a dedicated public relay we operate, and audio
+                    # cross-network needs sustained bandwidth through it
 ui:
   theme: auto
   notification_sound: false

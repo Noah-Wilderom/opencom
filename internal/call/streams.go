@@ -333,11 +333,16 @@ func (e *Engine) handleStream(stream network.Stream) {
 
 	s := NewSession(first.CallID, remote, Inbound, e.now)
 	e.bind(s, stream)
+	// Register BEFORE the Ringing transition so the Manager's
+	// per-session forwarder is in place before the first state-change
+	// event fires. Otherwise WatchCalls (and any other Manager-level
+	// subscriber) misses the inbound "ringing" event entirely — the
+	// reason desktop notifications weren't firing for incoming calls.
+	e.manager.Register(s)
 	if err := s.ToRinging(); err != nil {
 		_ = stream.Close()
 		return
 	}
-	e.manager.Register(s)
 	e.runScanner(s, scanner)
 }
 

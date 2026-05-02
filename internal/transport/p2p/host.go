@@ -15,6 +15,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
+	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 
@@ -83,6 +84,13 @@ type HostOptions struct {
 	// Zero value (network.ReachabilityUnknown) leaves AutoNAT in
 	// charge.
 	ForceReachability network.Reachability
+
+	// RelayServiceUnlimited removes libp2p's default per-circuit
+	// caps (128 KiB of forwarded data, 2 minutes of duration) on
+	// the relay service this host runs. Set true on dedicated
+	// public relay nodes; leave false on clients. See
+	// config.RelayConfig.Unlimited for the user-facing toggle.
+	RelayServiceUnlimited bool
 }
 
 // Host wraps the libp2p host with opencom-specific helpers, including
@@ -143,6 +151,19 @@ func New(ctx context.Context, opts HostOptions) (*Host, error) {
 		relays = rs
 	}
 
+	// Build the relay-service options. Default keeps libp2p's
+	// 128 KiB / 2 min per-circuit caps (sane for clients that
+	// accidentally end up serving relay traffic). Unlimited mode
+	// passes Limit: nil through Resources, which the relay-v2 spec
+	// interprets as "no cap" — required on dedicated public relays
+	// so audio doesn't terminate the circuit after ~25 seconds.
+	relayServiceOpts := []relayv2.Option{}
+	if opts.RelayServiceUnlimited {
+		res := relayv2.DefaultResources()
+		res.Limit = nil
+		relayServiceOpts = append(relayServiceOpts, relayv2.WithResources(res))
+	}
+
 	var ddht *dht.IpfsDHT
 	libp2pOpts := []libp2p.Option{
 		libp2p.Identity(opts.PrivKey),
@@ -153,7 +174,7 @@ func New(ctx context.Context, opts HostOptions) (*Host, error) {
 		libp2p.NATPortMap(),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableAutoNATv2(),
-		libp2p.EnableRelayService(),
+		libp2p.EnableRelayService(relayServiceOpts...),
 		// libp2p invokes this Routing callback synchronously during New(),
 		// before the host is returned, so the local ddht assignment is
 		// race-free relative to subsequent ddht usage below.

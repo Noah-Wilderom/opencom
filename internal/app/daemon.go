@@ -174,12 +174,13 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	host, err := p2p.New(ctx, p2p.HostOptions{
-		PrivKey:           opts.Identity.Priv,
-		ListenAddrs:       listenAddrs,
-		BootstrapPeers:    bootstraps,
-		RelayPeers:        relays,
-		DHTMode:           dhtMode,
-		ForceReachability: forceReach,
+		PrivKey:               opts.Identity.Priv,
+		ListenAddrs:           listenAddrs,
+		BootstrapPeers:        bootstraps,
+		RelayPeers:            relays,
+		DHTMode:               dhtMode,
+		ForceReachability:     forceReach,
+		RelayServiceUnlimited: opts.Config.Relay.Unlimited,
 	})
 	if err != nil {
 		return fmt.Errorf("constructing libp2p host: %w", err)

@@ -94,6 +94,17 @@ type RelayConfig struct {
 	// Defaults to libp2p's public bootstrap nodes, which run
 	// relay-v2 services. Self-hosted deployments should override.
 	Peers []string `yaml:"peers"`
+
+	// Unlimited removes libp2p's default per-circuit caps on the
+	// relay service hosted by this daemon: 128 KiB of forwarded
+	// data and 2 minutes of duration. Set to true ONLY on dedicated
+	// relay nodes you operate. With audio at ~5 KB/sec, the default
+	// cap closes a relayed circuit after ~25s; flipping this to true
+	// on a public relay node is what lets cross-network calls keep
+	// flowing while DCUtR hasn't yet upgraded the path to direct
+	// QUIC. Default false on clients (they shouldn't be unbounded
+	// relays for strangers).
+	Unlimited bool `yaml:"unlimited"`
 }
 
 // UIConfig configures the TUI and notifications.

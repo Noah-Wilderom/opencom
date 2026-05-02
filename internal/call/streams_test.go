@@ -49,6 +49,44 @@ func twoEngines(t *testing.T, ctx context.Context) (*call.Engine, *call.Engine, 
 	return eA, eB, mA, mB, hA.ID(), hB.ID()
 }
 
+// TestEngine_InboundRingingReachesManagerSubscribers proves that the
+// "ringing" state-change event for an inbound session is delivered
+// to Manager-level subscribers (SubscribeStateChanges) — not lost in
+// the gap between Session.ToRinging() broadcasting and Manager.Register
+// installing the per-session forwarder. Regression test for the
+// notification bug: WatchCalls (in package notify) subscribes to the
+// callee's Manager and would otherwise miss the inbound ringing event,
+// resulting in no "Incoming call from X" desktop notification.
+func TestEngine_InboundRingingReachesManagerSubscribers(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	eA, _, _, mB, _, peerB := twoEngines(t, ctx)
+
+	// Subscribe BEFORE placing the call so we can't miss any events.
+	events := mB.SubscribeStateChanges()
+	defer mB.UnsubscribeStateChanges(events)
+
+	_, err := eA.Place(ctx, peerB)
+	assert.NoError(t, err)
+
+	// Drain events until we see "ringing" with direction "inbound"
+	// (the event the notification watcher acts on), or time out.
+	deadline := time.After(2 * time.Second)
+	sawInboundRinging := false
+	for !sawInboundRinging {
+		select {
+		case ev := <-events:
+			if ev.State == "ringing" && ev.Direction == "inbound" {
+				sawInboundRinging = true
+			}
+		case <-deadline:
+			t.Fatal("manager subscribers never received an inbound ringing event")
+		}
+	}
+}
+
 func TestEngine_PlaceDeliversInvite(t *testing.T) {
 	t.Parallel()
 
