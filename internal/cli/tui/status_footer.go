@@ -15,6 +15,7 @@ const (
 	statusConnected
 	statusDaemonDown
 	statusNoRelay
+	statusError
 )
 
 // statusFooterState bundles everything the footer renderer needs.
@@ -49,6 +50,8 @@ func renderStatusFooter(s statusFooterState) string {
 		ind = theme.err.Render("● daemon down")
 	case statusNoRelay:
 		ind = theme.warn.Render("⚠ no relay reservation")
+	case statusError:
+		ind = theme.err.Render("✖ " + s.Detail)
 	default:
 		ind = theme.dim.Render("● relay reserved")
 	}

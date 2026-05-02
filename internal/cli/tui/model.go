@@ -42,6 +42,11 @@ type Model struct {
 
 	// clipboard surface for the add-friend modal.
 	clipboard Clipboard
+
+	// callTargetName is the friend name passed to the most recent
+	// startCallCmd — used to populate the dock's Remote field before
+	// the daemon emits its first state event for the new call.
+	callTargetName string
 }
 
 // NewModel constructs the root Model from Options.
@@ -75,6 +80,10 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		loadFriendsCmd(m.client),
 		subscribeCallsCmd(m.client),
+		// Immediate status check so the footer reflects reality on
+		// frame 1 instead of showing the default "relay reserved"
+		// for 5s while waiting for the first tick.
+		loadDaemonStatusCmd(m.client),
 		tickDaemonStatusCmd(m.client),
 	)
 }
@@ -154,6 +163,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncFocusFromSelection()
 		case "enter":
 			if sel, ok := m.friends.Selected(); ok {
+				m.callTargetName = sel.Name
 				return m, startCallCmd(m.client, sel.Name)
 			}
 		case "q":
@@ -185,9 +195,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Subscription opened; start draining its events.
 		return m, waitForSubEventCmd(msg.Sub, "calls")
 	case callStartedMsg:
-		// calls.start subscription opened (per-call). Drain its
-		// events too so we receive the immediate ringing → connected
-		// transitions before the manager-level subscription does.
+		// calls.start subscription opened (per-call). Surface a
+		// "calling" placeholder state immediately so the dock pops
+		// even before the daemon emits the first state event — a
+		// purely-async pop-on-event flow gives the user no feedback
+		// from pressing enter.
+		if !m.dock.Active() {
+			m.dock.SetState(callDockState{
+				State:  "calling",
+				Remote: m.callTargetName,
+			})
+			m.footer.Status = statusRinging
+			m.footer.Detail = m.callTargetName
+		}
+		// Drain the per-call subscription so the immediate
+		// ringing → connected transitions are received before the
+		// manager-level subscription does.
 		return m, waitForSubEventCmd(msg.Sub, "calls.start")
 	case inviteCreatedMsg:
 		// invite.create response — promote modal from loading to
@@ -252,13 +275,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// keeps tracking the daemon even after recoveries from errors.
 		return m, tickDaemonStatusCmd(m.client)
 	case errMsg:
-		m.footer.Detail = "err: " + msg.Source
 		if msg.Source == "daemon.status" {
 			m.footer.Status = statusDaemonDown
+			m.footer.Detail = ""
 			// Keep retrying so the footer recovers when the daemon
 			// comes back.
 			return m, tickDaemonStatusCmd(m.client)
 		}
+		m.footer.Status = statusError
+		m.footer.Detail = msg.Source + ": " + msg.Err.Error()
 	}
 	return m, nil
 }

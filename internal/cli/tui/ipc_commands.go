@@ -199,7 +199,13 @@ func subscribeInviteRedemptionCmd(c Client, code string) tea.Cmd {
 // Returns daemonStatusMsg or errMsg.
 func tickDaemonStatusCmd(c Client) tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		// 5s timeout (matches ipcTimeout). The previous 1s budget
+		// flagged the daemon as down whenever a status round-trip
+		// happened to coincide with another in-flight call (e.g.
+		// the inbound 5s tick coinciding with a fresh subscription
+		// open) — the user sees "daemon down" even though the daemon
+		// is healthy.
+		ctx, cancel := context.WithTimeout(context.Background(), ipcTimeout)
 		defer cancel()
 		s, err := c.DaemonStatus(ctx)
 		if err != nil {
