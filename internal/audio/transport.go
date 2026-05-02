@@ -181,7 +181,14 @@ func NewLibp2pTransport(ctx context.Context, h host.Host, p peer.ID) (Transport,
 	}
 
 	// 2. Open our outgoing control stream to p (write side).
-	outStream, err := h.NewStream(ctx, p, AudioControlProtocol)
+	// Allow opening over a libp2p "limited" (relay-v2) connection.
+	// Without this opt-in, libp2p's swarm refuses to open streams on
+	// relayed connections and waits for DCUtR to upgrade them, which
+	// often deadlocks the audio-session setup behind the call control
+	// plane. Datagrams still go over the direct QUIC connection that
+	// findDatagramConn picked above, regardless of this flag.
+	streamCtx := network.WithAllowLimitedConn(ctx, "opencom-audio-control")
+	outStream, err := h.NewStream(streamCtx, p, AudioControlProtocol)
 	if err != nil {
 		return nil, fmt.Errorf("opening audio-control stream to %s: %w", p, err)
 	}

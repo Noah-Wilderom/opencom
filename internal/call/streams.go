@@ -126,12 +126,20 @@ func (e *Engine) Stop() {
 func (e *Engine) Place(ctx context.Context, remote peer.ID) (*Session, error) {
 	e.populatePeerstoreFromResolver(ctx, remote, false)
 	e.populatePeerstoreWithRelayFallback(remote)
-	stream, err := e.host.HostInternal().NewStream(ctx, remote, ProtocolID)
+	// Allow opening the call control stream over a libp2p "limited"
+	// (relay-v2) connection. Without this opt-in, libp2p's swarm
+	// refuses to open streams on relayed connections and blocks
+	// waitForDirectConn until DCUtR succeeds — which is exactly the
+	// "failed to open stream: context deadline exceeded" symptom we
+	// kept hitting cross-network. Audio media still requires datagrams
+	// (direct QUIC), but the JSON control plane is happy over relay.
+	dialCtx := network.WithAllowLimitedConn(ctx, "opencom-call-control")
+	stream, err := e.host.HostInternal().NewStream(dialCtx, remote, ProtocolID)
 	if err != nil && e.resolver != nil {
 		e.log.Debug("first dial failed; forcing fresh DHT lookup and retrying",
 			zap.String("peer", remote.String()), zap.Error(err))
 		if e.populatePeerstoreFromResolver(ctx, remote, true) {
-			stream, err = e.host.HostInternal().NewStream(ctx, remote, ProtocolID)
+			stream, err = e.host.HostInternal().NewStream(dialCtx, remote, ProtocolID)
 		}
 	}
 	if err != nil {
