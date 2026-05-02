@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 
 	"opencom/internal/call"
@@ -33,6 +34,7 @@ func TestDaemonStatusSummary_AggregatesFields(t *testing.T) {
 		"v0.1.0", kp, startedAt,
 		func() []string { return []string{"/ip4/127.0.0.1/tcp/4001"} },
 		func() string { return "public" },
+		func() []peer.ID { return nil },
 		friendsStore, presence, callMgr, inviteStore,
 	)
 

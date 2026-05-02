@@ -2,6 +2,7 @@ package call_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -273,6 +274,37 @@ func TestEngine_PlaceRefreshesAddressesOnDialFailure(t *testing.T) {
 
 	assert.Equal(t, 2, r.calls, "resolver must be consulted twice (initial + post-failure refresh)")
 	assert.Equal(t, hB.ID(), r.invalidated, "resolver cache must be invalidated for the target between attempts")
+}
+
+// TestTranslateDialError_RewritesNoReservation proves that a libp2p
+// dial error mentioning NO_RESERVATION is rewritten into an actionable
+// message that names the peer and points the user at the likely fix
+// (peer needs a relay reservation). All other errors pass through
+// unchanged so genuinely novel failures still surface in full.
+func TestTranslateDialError_RewritesNoReservation(t *testing.T) {
+	t.Parallel()
+
+	pid := peer.ID("12D3KooWFakeForTest")
+
+	t.Run("no reservation", func(t *testing.T) {
+		raw := errors.New("failed to dial: all dials failed\n  * [/ip4/x/p2p-circuit] error opening relay circuit: NO_RESERVATION (204)")
+		got := call.TranslateDialErrorForTest(pid, raw)
+		assert.Error(t, got)
+		assert.Contains(t, got.Error(), "no relay reservation")
+		assert.Contains(t, got.Error(), pid.String())
+		// Original error preserved via %w so callers can still inspect.
+		assert.ErrorIs(t, got, raw)
+	})
+
+	t.Run("unrelated error passes through", func(t *testing.T) {
+		raw := errors.New("connection failed")
+		got := call.TranslateDialErrorForTest(pid, raw)
+		assert.Equal(t, raw, got, "non-NO_RESERVATION errors must not be rewritten")
+	})
+
+	t.Run("nil passes through", func(t *testing.T) {
+		assert.NoError(t, call.TranslateDialErrorForTest(pid, nil))
+	})
 }
 
 func TestEngine_PlaceConsultsResolverBeforeDial(t *testing.T) {

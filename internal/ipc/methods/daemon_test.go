@@ -19,7 +19,7 @@ func TestDaemonStatus_PopulatesAllFields(t *testing.T) {
 	assert.NoError(t, err)
 	startedAt := time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC)
 
-	h := methods.DaemonStatus("v0.1.0", kp, startedAt, nil, nil)
+	h := methods.DaemonStatus("v0.1.0", kp, startedAt, nil, nil, nil)
 	out, err := h(context.Background(), nil)
 	assert.NoError(t, err)
 
@@ -46,7 +46,7 @@ func TestDaemonStatus_IncludesListenAddrs(t *testing.T) {
 	startedAt := time.Now().UTC()
 	addrs := []string{"/ip4/127.0.0.1/tcp/4001/p2p/12D3KooW..."}
 
-	h := methods.DaemonStatus("v1", kp, startedAt, func() []string { return addrs }, func() string { return "public" })
+	h := methods.DaemonStatus("v1", kp, startedAt, func() []string { return addrs }, func() string { return "public" }, nil)
 	out, err := h(context.Background(), nil)
 	assert.NoError(t, err)
 
@@ -66,7 +66,8 @@ func TestDaemonStatus_ReachabilityPropagates(t *testing.T) {
 
 	h := methods.DaemonStatus("v1", kp, startedAt,
 		func() []string { return nil },
-		func() string { return "private" })
+		func() string { return "private" },
+		nil)
 	out, err := h(context.Background(), nil)
 	assert.NoError(t, err)
 	res, ok := out.(methods.DaemonStatusResult)

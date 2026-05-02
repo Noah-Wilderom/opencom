@@ -374,7 +374,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	server := ipc.NewServer(opts.Log, opts.Version)
 	server.Register("daemon.status",
-		methods.DaemonStatus(opts.Version, opts.Identity, opts.StartedAt, host.ListenAddrs, host.Reachability))
+		methods.DaemonStatus(opts.Version, opts.Identity, opts.StartedAt, host.ListenAddrs, host.Reachability, host.RelayReservations))
 	server.Register("daemon.shutdown", methods.DaemonShutdown(cancel))
 	server.Register("identity.get", methods.IdentityGet(opts.Identity, opts.Config))
 	server.Register("friends.add", methods.FriendsAdd(store))
@@ -403,7 +403,7 @@ func Run(ctx context.Context, opts Options) error {
 	server.Register("invite.redeem", methods.InviteRedeem(inviteMgr))
 	server.Register("daemon.status_summary",
 		methods.DaemonStatusSummary(opts.Version, opts.Identity, opts.StartedAt,
-			host.ListenAddrs, host.Reachability, store, presence, callMgr, inviteStore))
+			host.ListenAddrs, host.Reachability, host.RelayReservations, store, presence, callMgr, inviteStore))
 
 	opts.Log.Info("daemon listening",
 		zap.String("socket", opts.Paths.SocketPath),

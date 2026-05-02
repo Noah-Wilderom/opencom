@@ -173,6 +173,19 @@ func runDaemonStatus(cmd *cobra.Command) error {
 	if status.Reachability != "" {
 		fmt.Fprintf(out, "reach   : %s\n", status.Reachability)
 	}
+	// Surface AutoRelay state explicitly. Without this, users debugging
+	// a NO_RESERVATION dial failure had to mentally grep the listen-addrs
+	// block for /p2p-circuit/. "no reservations" specifically distinguishes
+	// the (a) doesn't-need-relay (publicly reachable) and (b) AutoRelay
+	// hasn't-yet-succeeded cases from a populated reservation list.
+	if len(status.Relays) == 0 {
+		fmt.Fprintln(out, "relays  : no reservations")
+	} else {
+		fmt.Fprintln(out, "relays  :")
+		for _, r := range status.Relays {
+			fmt.Fprintf(out, "          reserved on %s\n", r)
+		}
+	}
 	if len(status.ListenAddrs) > 0 {
 		fmt.Fprintln(out, "listen  :")
 		for _, a := range status.ListenAddrs {

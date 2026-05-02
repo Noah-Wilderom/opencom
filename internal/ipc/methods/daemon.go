@@ -22,13 +22,28 @@ type DaemonStatusResult struct {
 	ListenAddrs  []string  `json:"listen_addrs"`
 	CurrentCalls []string  `json:"current_calls"`
 	Reachability string    `json:"reachability"`
+	// Relays is the set of relay peer IDs we currently hold a
+	// circuit-relay-v2 reservation on. Empty when the daemon has no
+	// reservations — typically because (a) it doesn't need any (publicly
+	// reachable) or (b) AutoRelay hasn't yet succeeded with any
+	// configured relay (transient, or NAT/firewall blocks the relay).
+	Relays []peer.ID `json:"relays"`
 }
 
 // DaemonStatus returns an ipc.Handler that reports the daemon's current
-// status. listenAddrs and reachability are functions so the daemon can
-// expose live state (the libp2p host's dynamic addrs and the AutoNAT
-// reachability that may flip mid-session as the network changes).
-func DaemonStatus(version string, kp identity.Keypair, startedAt time.Time, listenAddrs func() []string, reachability func() string) ipc.Handler {
+// status. listenAddrs, reachability, and relayReservations are
+// functions so the daemon can expose live state (the libp2p host's
+// dynamic addrs, the AutoNAT reachability that may flip mid-session
+// as the network changes, and AutoRelay reservations that come and go
+// as the relay process restarts or the connection drops).
+func DaemonStatus(
+	version string,
+	kp identity.Keypair,
+	startedAt time.Time,
+	listenAddrs func() []string,
+	reachability func() string,
+	relayReservations func() []peer.ID,
+) ipc.Handler {
 	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		addrs := []string{}
 		if listenAddrs != nil {
@@ -41,6 +56,12 @@ func DaemonStatus(version string, kp identity.Keypair, startedAt time.Time, list
 		if reachability != nil {
 			reach = reachability()
 		}
+		relays := []peer.ID{}
+		if relayReservations != nil {
+			if r := relayReservations(); r != nil {
+				relays = r
+			}
+		}
 		return DaemonStatusResult{
 			Version:      version,
 			PeerID:       kp.PeerID,
@@ -48,6 +69,7 @@ func DaemonStatus(version string, kp identity.Keypair, startedAt time.Time, list
 			ListenAddrs:  addrs,
 			CurrentCalls: []string{},
 			Reachability: reach,
+			Relays:       relays,
 		}, nil
 	}
 }

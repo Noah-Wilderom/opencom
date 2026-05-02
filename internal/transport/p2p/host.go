@@ -295,6 +295,61 @@ func isRelayCircuitAddr(a ma.Multiaddr) bool {
 	return false
 }
 
+// RelayReservations returns the unique peer IDs of relays that have
+// granted us a circuit-relay-v2 reservation. Derived from the host's
+// own listen addresses: any address of the form
+// /...<relay-multiaddr>/p2p/<RELAY-ID>/p2p-circuit/... reflects an
+// active reservation on that relay (libp2p removes these addrs as soon
+// as the reservation is dropped).
+//
+// Used by `daemon status` to surface AutoRelay state explicitly so
+// users don't have to grep the listen-addr block for /p2p-circuit/.
+func (h *Host) RelayReservations() []peer.ID {
+	seen := map[peer.ID]struct{}{}
+	out := []peer.ID{}
+	for _, a := range h.h.Addrs() {
+		id, ok := relayIDFromCircuitAddr(a)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// relayIDFromCircuitAddr extracts the relay's peer ID from a
+// /p2p-circuit multiaddr. The /p2p/<id> component immediately preceding
+// /p2p-circuit identifies the relay (the trailing /p2p/<target> after
+// /p2p-circuit identifies the destination, which is us).
+func relayIDFromCircuitAddr(a ma.Multiaddr) (peer.ID, bool) {
+	var (
+		lastPeer string
+		found    bool
+	)
+	ma.ForEach(a, func(c ma.Component) bool {
+		switch c.Protocol().Name {
+		case "p2p":
+			lastPeer = c.Value()
+		case "p2p-circuit":
+			found = lastPeer != ""
+			return false // stop iteration
+		}
+		return true
+	})
+	if !found {
+		return "", false
+	}
+	id, err := peer.Decode(lastPeer)
+	if err != nil {
+		return "", false
+	}
+	return id, true
+}
+
 // Connect dials info and adds its addresses to the peerstore.
 func (h *Host) Connect(ctx context.Context, info peer.AddrInfo) error {
 	return h.h.Connect(ctx, info)

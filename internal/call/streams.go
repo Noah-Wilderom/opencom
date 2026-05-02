@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,7 +127,7 @@ func (e *Engine) Place(ctx context.Context, remote peer.ID) (*Session, error) {
 		if e.resolver != nil {
 			e.resolver.InvalidateCache(remote)
 		}
-		return nil, fmt.Errorf("opening control stream to %s: %w", remote, err)
+		return nil, fmt.Errorf("opening control stream to %s: %w", remote, translateDialError(remote, err))
 	}
 
 	id := NewCallID()
@@ -150,6 +151,29 @@ func (e *Engine) Place(ctx context.Context, remote peer.ID) (*Session, error) {
 	}
 	go e.readLoop(s)
 	return s, nil
+}
+
+// translateDialError rewrites libp2p's verbose dial-failure errors
+// into something a user can act on. The single most common opaque
+// failure mode users hit is a relay-mediated dial whose every
+// candidate path returns NO_RESERVATION (the target peer hasn't
+// reserved a circuit slot, or the relay restarted and dropped its
+// reservation table). Rather than leaving them to grep a 26-line wall
+// of dial errors, we surface that explicitly.
+//
+// On any non-matching error we return it unchanged so callers still
+// get the full libp2p detail when something genuinely novel breaks.
+func translateDialError(remote peer.ID, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "NO_RESERVATION") {
+		return err
+	}
+	return fmt.Errorf("peer %s has no relay reservation — they may need to "+
+		"restart their daemon or their network is blocking AutoRelay "+
+		"(original: %w)", remote, err)
 }
 
 // populatePeerstoreFromResolver consults the Resolver and merges any

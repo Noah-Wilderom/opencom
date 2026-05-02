@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"opencom/internal/call"
 	"opencom/internal/friends"
 	"opencom/internal/identity"
@@ -32,13 +34,14 @@ func DaemonStatusSummary(
 	started time.Time,
 	listenAddrs func() []string,
 	reachability func() string,
+	relayReservations func() []peer.ID,
 	friendsStore *friends.Store,
 	presence *friends.Presence,
 	callMgr *call.Manager,
 	inviteStore *invite.Store,
 ) ipc.Handler {
 	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
-		statusH := DaemonStatus(version, kp, started, listenAddrs, reachability)
+		statusH := DaemonStatus(version, kp, started, listenAddrs, reachability, relayReservations)
 		statusOut, err := statusH(context.Background(), nil)
 		if err != nil {
 			return nil, err

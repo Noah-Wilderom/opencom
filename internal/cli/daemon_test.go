@@ -83,7 +83,7 @@ func startInProcessServer(t *testing.T, kp identity.Keypair, version string, sta
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := ipc.NewServer(zap.NewNop(), version)
-	s.Register("daemon.status", methods.DaemonStatus(version, kp, startedAt, nil, nil))
+	s.Register("daemon.status", methods.DaemonStatus(version, kp, startedAt, nil, nil, nil))
 	go func() { _ = s.Serve(ctx, ln) }()
 
 	return func() {

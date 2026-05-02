@@ -74,7 +74,8 @@ apt-get install -y -q \
   ca-certificates curl gnupg jq \
   ufw fail2ban \
   unattended-upgrades \
-  systemd-timesyncd
+  systemd-timesyncd \
+  libopus0 libopusfile0
 
 systemctl enable --now systemd-timesyncd
 
@@ -201,7 +202,9 @@ if [[ "$INSTALLED_VERSION" != "$NEEDED_VERSION" || "$NEEDED_VERSION" == "latest"
   TMPDIR="$(mktemp -d)"
   trap 'rm -rf "$TMPDIR"' EXIT
   curl -fsSL --retry 5 --retry-delay 5 "$URL" -o "$TMPDIR/opencom.tar.gz"
-  tar -xzf "$TMPDIR/opencom.tar.gz" -C "$TMPDIR"
+  # --strip-components=1 drops the opencom_<version>_<OS>_<arch>/ prefix
+  # the matrix release workflow puts inside the archive.
+  tar -xzf "$TMPDIR/opencom.tar.gz" -C "$TMPDIR" --strip-components=1
   install -m 0755 "$TMPDIR/opencom" /usr/local/bin/opencom
 fi
 /usr/local/bin/opencom version

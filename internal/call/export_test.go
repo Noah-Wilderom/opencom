@@ -15,3 +15,10 @@ func (e *Engine) HostForTest() interface {
 } {
 	return e.host.HostInternal()
 }
+
+// TranslateDialErrorForTest exposes translateDialError so tests in the
+// _test package can assert on the rewritten error text without standing
+// up a fake libp2p swarm to provoke a real NO_RESERVATION dial path.
+func TranslateDialErrorForTest(remote peer.ID, err error) error {
+	return translateDialError(remote, err)
+}
