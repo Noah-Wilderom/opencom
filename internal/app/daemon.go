@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -23,6 +24,7 @@ import (
 	"opencom/internal/ipc/methods"
 	"opencom/internal/notify"
 	"opencom/internal/transport/p2p"
+	"opencom/internal/version"
 )
 
 // parseDHTMode maps the "auto"|"server"|"client" string from
@@ -383,10 +385,17 @@ func Run(ctx context.Context, opts Options) error {
 		}()
 	}
 
+	// Background version checker: refreshes the latest-release cache
+	// on a slow cadence so version.check IPC requests are served from
+	// disk without ever blocking the CLI on a network round-trip.
+	versionChecker := version.New(opts.Paths.StateDir)
+	go runVersionChecker(ctx, versionChecker, opts.Log.Named("version"))
+
 	server := ipc.NewServer(opts.Log, opts.Version)
 	server.Register("daemon.status",
 		methods.DaemonStatus(opts.Version, opts.Identity, opts.StartedAt, host.ListenAddrs, host.Reachability, host.RelayReservations))
 	server.Register("daemon.shutdown", methods.DaemonShutdown(cancel))
+	server.Register("version.check", methods.VersionCheck(opts.Version, versionChecker))
 	server.Register("identity.get", methods.IdentityGet(opts.Identity, opts.Config))
 	server.Register("friends.add", methods.FriendsAdd(store))
 	server.Register("friends.list", methods.FriendsList(store, presence))
@@ -424,4 +433,30 @@ func Run(ctx context.Context, opts Options) error {
 	err = server.Serve(ctx, listener)
 	opts.Log.Info("daemon stopped")
 	return err
+}
+
+// runVersionChecker refreshes the latest-release cache once at startup
+// (so the first CLI invocation after a daemon restart gets a fresh
+// answer instead of the stale pre-restart cache) and then on
+// version.CheckInterval ticks. Errors are logged at debug level only
+// — a transient GitHub-API hiccup is never fatal to the daemon.
+func runVersionChecker(ctx context.Context, c *version.Checker, log *zap.Logger) {
+	refresh := func() {
+		rctx, cancel := context.WithTimeout(ctx, version.HTTPTimeout)
+		defer cancel()
+		if _, err := c.Refresh(rctx); err != nil {
+			log.Debug("version check failed", zap.Error(err))
+		}
+	}
+	refresh()
+	tk := time.NewTicker(version.CheckInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			refresh()
+		}
+	}
 }
