@@ -188,25 +188,27 @@ func translateDialError(remote peer.ID, err error) error {
 }
 
 // populatePeerstoreWithRelayFallback adds /<relay>/p2p-circuit dial
-// candidates for target into the peerstore — but ONLY when the
-// peerstore has no fresh addresses already. The point is to give a
-// stranded peer (cached addrs expired, DHT lookup failed) a guaranteed
-// try-via-relay path; we deliberately skip when libp2p already has
-// good data, both to avoid pointless extra dials and to avoid
-// suppressing a working direct path with a slow/unreachable relay.
+// candidates for target into the peerstore on every Place call.
 //
-// Safe to call repeatedly: AddAddr is additive and TempAddrTTL ensures
-// the entries don't accumulate forever in the peerstore.
+// We add unconditionally — even when the peerstore already has some
+// addresses for the target — because the persisted peerstore on disk
+// commonly holds stale entries from previous sessions (LAN addresses
+// from a different network, expired QUIC ports, etc.) that libp2p
+// will happily try and time out on. Without the relay path also being
+// in the dial set, NewStream sits on those stale addrs until ctx
+// cancels. With it, libp2p's parallel dialer races the relay path
+// against the stale ones and the relay typically wins.
 //
-// No-op when no relays are configured (test rigs, custom deployments).
+// Safe to call repeatedly: AddAddr is additive and TempAddrTTL keeps
+// the peerstore from growing unboundedly.
+//
+// No-op when no relays are configured (test rigs that pass empty
+// HostRelays, custom deployments).
 func (e *Engine) populatePeerstoreWithRelayFallback(target peer.ID) {
 	if len(e.relays) == 0 {
 		return
 	}
 	pstore := e.host.HostInternal().Peerstore()
-	if len(pstore.Addrs(target)) > 0 {
-		return
-	}
 	circuit, err := ma.NewMultiaddr("/p2p-circuit")
 	if err != nil {
 		return
