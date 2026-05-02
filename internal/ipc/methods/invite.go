@@ -157,6 +157,67 @@ func InviteRevoke(mgr *invite.Manager) ipc.Handler {
 	}
 }
 
+// InviteSubscribeRedemptionParams identifies which invite code to
+// subscribe to redemption events for.
+type InviteSubscribeRedemptionParams struct {
+	Code string `json:"code"`
+}
+
+// InviteSubscribeRedemptionResult is the response shape — matches
+// FriendsSubscribePresenceResult / CallsSubscribeResult: just a
+// subscription ID the caller can correlate with subsequent
+// "invite_redeemed" events.
+type InviteSubscribeRedemptionResult struct {
+	SubscriptionID string `json:"subscription_id"`
+}
+
+// InviteRedemptionEvent is the per-event payload emitted on the
+// "invite_redeemed" subscription channel.
+type InviteRedemptionEvent struct {
+	Code       string `json:"code"`
+	RedeemedBy string `json:"redeemed_by"`
+}
+
+// InviteSubscribeRedemption registers a subscription that fires when
+// the named invite code is redeemed by a peer. The TUI's generate-
+// invite modal uses this to render "Invite redeemed by Alice" before
+// auto-closing.
+func InviteSubscribeRedemption(mgr *invite.Manager) ipc.Handler {
+	return func(ctx context.Context, raw json.RawMessage) (interface{}, error) {
+		var p InviteSubscribeRedemptionParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, ipc.NewError(ipc.ErrCodeInvalidParams, "invalid params: "+err.Error())
+		}
+		if p.Code == "" {
+			return nil, ipc.NewError(ipc.ErrCodeInvalidParams, "code is required")
+		}
+		conn := ipc.ConnFromContext(ctx)
+		if conn == nil {
+			return nil, ipc.NewError(ipc.ErrCodeInternalError, "invite.subscribe_redemption requires a connection context")
+		}
+		subID := newSubscriptionID()
+		events := mgr.SubscribeRedemption(p.Code)
+		go func() {
+			defer mgr.UnsubscribeRedemption(p.Code, events)
+			for {
+				select {
+				case <-conn.Done():
+					return
+				case ev, ok := <-events:
+					if !ok {
+						return
+					}
+					_ = conn.EmitEvent(subID, "invite_redeemed", InviteRedemptionEvent{
+						Code:       ev.Code,
+						RedeemedBy: ev.RedeemedBy,
+					})
+				}
+			}
+		}()
+		return InviteSubscribeRedemptionResult{SubscriptionID: subID}, nil
+	}
+}
+
 // InviteRedeem accepts both short codes (OPEN-XXXX-XXXX / bare 8-char)
 // and long URLs (opencom://join?...). URL form is detected by scanning
 // for "://"; otherwise we treat the input as a short code via

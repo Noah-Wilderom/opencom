@@ -6,6 +6,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"opencom/internal/ipc"
 )
 
 // Dialler returns an IPC client connected to the daemon. The TUI
@@ -29,6 +34,10 @@ type Options struct {
 	// the settings modal's "open in $EDITOR". Tests inject "true"
 	// (the no-op shell command); production passes "".
 	Editor string
+	// ConfigPath is the absolute path to opencom's config.yaml,
+	// shown in the settings modal so the user can edit it manually.
+	// Production wiring fills this from config.DefaultPaths().
+	ConfigPath string
 }
 
 // Run starts the TUI. Blocks until the user quits or ctx is cancelled.
@@ -36,19 +45,17 @@ func Run(opts Options) error {
 	if opts.Dialler == nil {
 		panic("tui.Run: Dialler is required")
 	}
-	// Implementation lands in Task 8.
-	return nil
+	ctx := context.Background()
+	client, err := opts.Dialler(ctx)
+	if err != nil {
+		return fmt.Errorf("dialling daemon: %w", err)
+	}
+	defer client.Close()
+	p := tea.NewProgram(NewModel(client, opts), tea.WithAltScreen())
+	_, err = p.Run()
+	return err
 }
 
-// Client is the daemon-facing surface the TUI uses. Defined here so
-// later tasks can reference it; the concrete shape lands in Task 7.
-type Client interface{}
-
-// Clipboard is the OS-clipboard surface the TUI uses. Defined here
-// so later tasks can reference it; the concrete shape lands in Task 19.
-type Clipboard interface{}
-
 // WrapIPCClient adapts a real *ipc.Client into the TUI's Client
-// interface. The implementation lands in Task 7; for now it returns
-// nil so dispatch wiring compiles.
-func WrapIPCClient(c interface{}) Client { return nil }
+// interface.
+func WrapIPCClient(c *ipc.Client) Client { return newRealClient(c) }

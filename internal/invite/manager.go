@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -85,6 +86,12 @@ type Manager struct {
 	log         *zap.Logger
 	displayName string
 	addrs       AddressProvider
+
+	// subsMu guards redeemSubs. Per-code redemption subscribers are
+	// notified via fanoutRedemption from the inviter-side success
+	// branch of handleStream (and from MarkRedeemedForTest in tests).
+	subsMu     sync.Mutex
+	redeemSubs map[string][]chan RedemptionEvent
 }
 
 // NewManager constructs a Manager. Returns an error if any required
@@ -122,6 +129,7 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 		log:         opts.Log,
 		displayName: opts.DisplayName,
 		addrs:       addrs,
+		redeemSubs:  make(map[string][]chan RedemptionEvent),
 	}, nil
 }
 
@@ -477,6 +485,73 @@ func (m *Manager) handleStream(s network.Stream) {
 		PublicKey:   base64.StdEncoding.EncodeToString(ourPubBytes),
 		DisplayName: m.displayName,
 	})
+
+	// Fan out the redemption event ONLY on the committed-success
+	// path: MarkConsumed succeeded, friends.Add succeeded, and the
+	// Accept response has been (best-effort) sent. Subscribers like
+	// the TUI's invite modal use this to render "Invite redeemed by
+	// <name>" and auto-close.
+	m.fanoutRedemption(RedemptionEvent{
+		Code:       string(hello.Code),
+		RedeemedBy: remote.String(),
+		RedeemedAt: time.Now().UTC(),
+	})
+}
+
+// SubscribeRedemption returns a buffered channel that emits a
+// RedemptionEvent every time the invite with the given code is
+// successfully redeemed. Callers must call UnsubscribeRedemption
+// with the returned channel to release resources.
+func (m *Manager) SubscribeRedemption(code string) <-chan RedemptionEvent {
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
+	ch := make(chan RedemptionEvent, 4)
+	m.redeemSubs[code] = append(m.redeemSubs[code], ch)
+	return ch
+}
+
+// UnsubscribeRedemption removes ch from the subscriber set for code.
+// Safe to call even if ch was never subscribed.
+func (m *Manager) UnsubscribeRedemption(code string, ch <-chan RedemptionEvent) {
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
+	subs := m.redeemSubs[code]
+	for i, c := range subs {
+		if c == ch {
+			m.redeemSubs[code] = append(subs[:i], subs[i+1:]...)
+			break
+		}
+	}
+}
+
+// RedemptionEvent is what SubscribeRedemption emits.
+type RedemptionEvent struct {
+	Code       string    `json:"code"`
+	RedeemedBy string    `json:"redeemed_by"` // peer.ID string of the redeemer
+	RedeemedAt time.Time `json:"redeemed_at"`
+}
+
+// MarkRedeemedForTest is exported only for ipc/methods tests that
+// need to drive a deterministic redemption. Production redemption
+// happens through the normal handleStream success path which fans
+// out via the same internal helper.
+func (m *Manager) MarkRedeemedForTest(code string, by peer.ID) {
+	m.fanoutRedemption(RedemptionEvent{Code: code, RedeemedBy: by.String(), RedeemedAt: time.Now().UTC()})
+}
+
+// fanoutRedemption non-blocking-sends ev to every subscriber for
+// ev.Code. Slow consumers (full buffer) drop the event rather than
+// stall the inviter-side stream handler.
+func (m *Manager) fanoutRedemption(ev RedemptionEvent) {
+	m.subsMu.Lock()
+	subs := append([]chan RedemptionEvent(nil), m.redeemSubs[ev.Code]...)
+	m.subsMu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
 }
 
 // addrStrings serialises ms to wire-format strings. Filtering is

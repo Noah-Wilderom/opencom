@@ -423,6 +423,7 @@ func Run(ctx context.Context, opts Options) error {
 	server.Register("invite.list", methods.InviteList(inviteStore))
 	server.Register("invite.revoke", methods.InviteRevoke(inviteMgr))
 	server.Register("invite.redeem", methods.InviteRedeem(inviteMgr))
+	server.Register("invite.subscribe_redemption", methods.InviteSubscribeRedemption(inviteMgr))
 	server.Register("daemon.status_summary",
 		methods.DaemonStatusSummary(opts.Version, opts.Identity, opts.StartedAt,
 			host.ListenAddrs, host.Reachability, host.RelayReservations, store, presence, callMgr, inviteStore))
