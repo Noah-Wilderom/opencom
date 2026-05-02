@@ -27,12 +27,9 @@ jobs:
             os_title: Linux
             arch_suffix: arm64
             archive: tar.gz
-          - runner: macos-13
-            goos: darwin
-            goarch: amd64
-            os_title: Darwin
-            arch_suffix: x86_64
-            archive: tar.gz
+          # darwin/amd64 dropped: GitHub retired the macos-13 Intel runner
+          # in 2026. Apple Silicon shipped in 2020; any Intel Mac user runs
+          # the darwin/arm64 binary transparently under Rosetta 2.
           - runner: macos-14
             goos: darwin
             goarch: arm64
