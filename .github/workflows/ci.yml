@@ -13,16 +13,14 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+      - name: install audio cgo deps
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev libopusfile-dev pkg-config
       - name: go vet
         run: go vet ./...
       - name: go test
         run: go test ./...
       - name: go test -race (selected packages)
-        run: go test -race ./internal/discovery/... ./internal/call/... ./internal/ipc/... ./internal/app/... ./internal/cli/... ./internal/transport/p2p/...
-      - name: cross-compile windows
-        run: GOOS=windows go build ./...
-      - name: cross-compile darwin
-        run: GOOS=darwin go build ./...
+        run: go test -race ./internal/discovery/... ./internal/call/... ./internal/ipc/... ./internal/app/... ./internal/cli/... ./internal/transport/p2p/... ./internal/audio/...
 
   test-macos:
     runs-on: macos-latest
@@ -37,6 +35,8 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+      - name: install audio cgo deps
+        run: brew install opus opusfile pkg-config
       - name: go vet
         run: go vet ./...
       - name: go test
@@ -44,11 +44,20 @@ jobs:
 
   test-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: msys2/setup-msys2@v2
         with:
-          go-version-file: 'go.mod'
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-opus
+            mingw-w64-x86_64-opusfile
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-go
       - name: go vet
         run: go vet ./...
       - name: go test

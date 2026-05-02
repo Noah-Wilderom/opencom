@@ -1,5 +1,21 @@
 version: "3"
 
+vars:
+  TF_DIR: deployments/terraform
+  SETUP_SCRIPT: deployments/scripts/setup-node.sh
+  ADMIN_USER: admin
+  SSH_PORT: "22"
+  # Public key — embedded into the server's authorized_keys via setup-node.sh.
+  SSH_PUBKEY_FILE: '{{.SSH_PUBKEY_FILE | default "~/.ssh/id_rsa.pub"}}'
+  # Private key — used by ssh/scp to authenticate. IdentitiesOnly=yes
+  # prevents ssh-agent from offering other keys and tripping
+  # "Too many authentication failures".
+  SSH_IDENTITY: '{{.SSH_IDENTITY | default "~/.ssh/id_rsa"}}'
+  SSH_OPTS: -i {{.SSH_IDENTITY}} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+  OPENCOM_REPO: Noah-Wilderom/opencom
+  OPENCOM_USER: opencom
+  OPENCOM_LISTEN_PORT: "4001"
+
 tasks:
   test:
     desc: Run the full Go test suite
@@ -11,3 +27,61 @@ tasks:
     cmds:
       - go test -coverprofile=coverage.out ./...
       - go tool cover -func=coverage.out
+
+  terraform:deploy:setup:
+    desc: Re-run setup-node.sh on the live server (uses terraform output server_ipv4).
+    vars:
+      IP:
+        sh: terraform -chdir={{.TF_DIR}} output -raw server_ipv4
+      SSH_KEY:
+        sh: cat {{.SSH_PUBKEY_FILE}}
+    cmds:
+      - scp -P {{.SSH_PORT}} {{.SSH_OPTS}} {{.SETUP_SCRIPT}} {{.ADMIN_USER}}@{{.IP}}:/tmp/setup-node.sh
+      - |
+        ssh -p {{.SSH_PORT}} {{.SSH_OPTS}} {{.ADMIN_USER}}@{{.IP}} \
+          "sudo env \
+            ADMIN_USER='{{.ADMIN_USER}}' \
+            ADMIN_SSH_KEY='{{.SSH_KEY}}' \
+            OPENCOM_USER='{{.OPENCOM_USER}}' \
+            OPENCOM_LISTEN_PORT='{{.OPENCOM_LISTEN_PORT}}' \
+            OPENCOM_REPO='{{.OPENCOM_REPO}}' \
+            OPENCOM_VERSION='latest' \
+            SSH_PORT='{{.SSH_PORT}}' \
+            bash /tmp/setup-node.sh"
+
+  terraform:deploy:update:
+    desc: Pull the latest GitHub release of opencom on the live server and restart the daemon.
+    vars:
+      IP:
+        sh: terraform -chdir={{.TF_DIR}} output -raw server_ipv4
+    cmds:
+      - |
+        ssh -p {{.SSH_PORT}} {{.SSH_OPTS}} {{.ADMIN_USER}}@{{.IP}} \
+          "sudo env OPENCOM_REPO='{{.OPENCOM_REPO}}' bash -s" <<'REMOTE'
+        set -euo pipefail
+        DPKG_ARCH="$(dpkg --print-architecture)"
+        case "$DPKG_ARCH" in
+          amd64) ASSET_ARCH="x86_64" ;;
+          arm64) ASSET_ARCH="arm64" ;;
+          *) echo "FATAL: unsupported arch '$DPKG_ARCH'" >&2; exit 3 ;;
+        esac
+        URL="$(curl -fsSL --retry 5 --retry-delay 5 \
+                 "https://api.github.com/repos/${OPENCOM_REPO}/releases/latest" \
+               | jq -r --arg arch "$ASSET_ARCH" '
+                   .assets[]
+                   | select(.name | endswith("Linux_" + $arch + ".tar.gz"))
+                   | .browser_download_url' | head -n1)"
+        if [[ -z "$URL" ]]; then
+          echo "FATAL: could not resolve latest opencom release URL" >&2
+          exit 4
+        fi
+        echo "===> downloading $URL"
+        TMPDIR="$(mktemp -d)"
+        trap 'rm -rf "$TMPDIR"' EXIT
+        curl -fsSL --retry 5 --retry-delay 5 "$URL" -o "$TMPDIR/opencom.tar.gz"
+        tar -xzf "$TMPDIR/opencom.tar.gz" -C "$TMPDIR"
+        install -m 0755 "$TMPDIR/opencom" /usr/local/bin/opencom
+        /usr/local/bin/opencom version
+        systemctl restart opencom.service
+        systemctl is-active --quiet opencom && echo "===> opencom restarted OK"
+        REMOTE
