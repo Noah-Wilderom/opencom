@@ -28,7 +28,7 @@ func newFakePair() (*fakeTransport, *fakeTransport) {
 		&fakeTransport{out: b2a, in: a2b, ctlOut: ctlB2A, ctlIn: ctlA2B}
 }
 
-func (f *fakeTransport) SendDatagram(b []byte) error {
+func (f *fakeTransport) SendMedia(b []byte) error {
 	cp := append([]byte(nil), b...)
 	select {
 	case f.out <- cp:
@@ -37,7 +37,7 @@ func (f *fakeTransport) SendDatagram(b []byte) error {
 	return nil
 }
 
-func (f *fakeTransport) RecvDatagram(ctx context.Context) ([]byte, error) {
+func (f *fakeTransport) RecvMedia(ctx context.Context) ([]byte, error) {
 	select {
 	case b := <-f.in:
 		return b, nil
@@ -45,6 +45,8 @@ func (f *fakeTransport) RecvDatagram(ctx context.Context) ([]byte, error) {
 		return nil, ctx.Err()
 	}
 }
+
+func (f *fakeTransport) MediaMode() string { return "fake" }
 
 func (f *fakeTransport) SendControl(m audio.ControlMessage) error {
 	f.ctlOut <- m

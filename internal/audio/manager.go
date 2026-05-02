@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
 	"go.uber.org/zap"
 
 	"opencom/internal/call"
@@ -157,23 +156,6 @@ func (m *Manager) startSession(ctx context.Context, ev call.StateChange) {
 	m.mu.Lock()
 	m.sessions[ev.SessionID] = sess
 	m.mu.Unlock()
-}
-
-// HandleControlStream is the libp2p stream handler for the audio control
-// protocol. The daemon registers this via SetStreamHandler so inbound
-// /opencom/audio-control/1.0.0 streams from peers are routed to the correct
-// Transport's readControlLoop via the per-(host,peer) inbound channel.
-//
-// When Host is nil (test path) the stream is closed immediately — no real
-// transport is running and RegisterStreamHandler was never called.
-func (m *Manager) HandleControlStream(stream network.Stream) {
-	if m.opts.Host == nil {
-		_ = stream.Close()
-		return
-	}
-	remote := stream.Conn().RemotePeer()
-	ch := inboundChan(m.opts.Host, remote)
-	ch <- stream // buffered (cap 8); practically instant
 }
 
 func (m *Manager) stopSession(callID string) {

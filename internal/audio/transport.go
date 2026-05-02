@@ -1,35 +1,47 @@
 package audio
 
-// transport.go — Task 7: datagram channel + audio control stream
+// transport.go — dual-stream + dual-path audio transport.
 //
-// Architecture: Option B (dual streams).
-//   - Each side opens its own outgoing control stream to the peer.
-//   - Each side registers a SetStreamHandler for AudioControlProtocol that
-//     receives the peer's outgoing stream and routes messages to Control().
-//   - Datagrams use the underlying *quic.Conn reached via network.Conn.As.
+// Two libp2p stream protocols, both opened per-call:
+//   - /opencom/audio-control/1.0.0  reliable: mute, stats, peer-mute
+//   - /opencom/audio-media/1.0.0    reliable: RTP/Opus media frames
 //
-// Concurrency note: NewLibp2pTransport does NOT block waiting for the peer's
-// reciprocal stream. Instead, the readControlLoop goroutine waits for the
-// inbound stream to arrive in the per-(host,peer) channel. This prevents a
-// deadlock when both sides call NewLibp2pTransport sequentially in a test:
-// A opens stream to B → B's handler fires → B's inCh gets A's stream; then B
-// opens stream to A → A's handler fires → A's inCh gets B's stream. Both
-// readControlLoops unblock immediately.
+// Plus an optional fast-path overlay: when a direct QUIC connection
+// exists (or appears mid-call via DCUtR), media frames bypass the
+// reliable stream and go over QUIC datagrams instead.
 //
-// Public surface required by Tasks 8/9:
-//   - Transport interface
-//   - NewLibp2pTransport
-//   - RegisterStreamHandler   (called once per host at startup / test setup)
-//   - ErrDatagramsUnavailable
-//   - ControlMessage
-//   - AudioControlProtocol
+// Send semantics:
+//   sendPump pulls from sendCh and prefers the datagram path when
+//   t.dconn is non-nil. Otherwise it falls back to the reliable stream.
+//   The choice is per-frame, so DCUtR success mid-call upgrades the
+//   next frame transparently.
+//
+// Recv semantics:
+//   recvCh is a shared bounded queue. Up to two pumps push into it:
+//     - recvPumpDatagram (started when t.dconn becomes non-nil)
+//     - recvPumpStream   (started when the peer's inbound media stream
+//                         shows up via the per-(host,proto,peer) registry)
+//   Duplicate frames (same RTP sequence on both paths) are deduped by
+//   the jitter buffer's seqDelta-aware Push.
+//
+// Backpressure:
+//   sendCh and recvCh are bounded. SendMedia returns
+//   ErrMediaBackpressure when sendCh is full (audio-real-time: drop is
+//   better than block). recvCh evicts oldest when full.
+//
+// Concurrency note: NewLibp2pTransport does NOT block waiting for the
+// peer's reciprocal streams. Goroutines wait on per-protocol inbound
+// channels populated by RegisterStreamHandler, so both peers can call
+// NewLibp2pTransport in either order without deadlocking.
 
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -40,212 +52,458 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// WaitForDatagramConnTimeout bounds how long NewLibp2pTransport will wait
-// for a direct QUIC connection to appear before giving up. When two peers
-// can only reach each other via libp2p's circuit relay (cross-network,
-// behind NAT), the initial Connect succeeds via /p2p-circuit but no QUIC
-// datagrams traverse the relay. libp2p's DCUtR (hole-punching) then runs
-// in the background and, when both NATs cooperate, upgrades the relay
-// path to a direct QUIC connection. This timeout gives DCUtR enough time
-// to complete one full attempt; 8s is conservative for typical home NATs
-// and still bounds the worst case (symmetric-NAT-on-both-sides → unfix‑
-// able) from blocking call setup indefinitely.
+// WaitForDatagramConnTimeout is the initial tight-poll window during
+// which the transport tries to attach a datagram fast-path before
+// settling into a slower background watch. 8s catches DCUtR's typical
+// hole-punch latency without delaying call setup beyond that bound.
 const WaitForDatagramConnTimeout = 8 * time.Second
 
-// datagramPollInterval is how often waitForDatagramConn re-checks the
-// connection set while waiting. Short enough that DCUtR success is picked
-// up promptly; not so short it busy-loops.
+// datagramPollInterval is how often the initial tight poll re-checks
+// findDatagramConn. Short enough to notice DCUtR success promptly,
+// long enough to not busy-loop.
 const datagramPollInterval = 100 * time.Millisecond
 
-// AudioControlProtocol is the libp2p stream protocol for audio control messages.
-const AudioControlProtocol = protocol.ID("/opencom/audio-control/1.0.0")
+// dcutrWatchInterval is how often the long-running watcher (active for
+// the call's lifetime after the initial tight window) re-checks for a
+// newly-available direct QUIC connection. Lower frequency keeps the
+// background work negligible.
+const dcutrWatchInterval = 2 * time.Second
 
-// ErrDatagramsUnavailable is returned by NewLibp2pTransport when none of the
-// connections to the remote peer expose a QUIC datagram interface. This happens
-// when the connection uses TCP or the WebTransport transport instead of QUIC v1.
+// Protocol IDs.
+const (
+	AudioControlProtocol = protocol.ID("/opencom/audio-control/1.0.0")
+	AudioMediaProtocol   = protocol.ID("/opencom/audio-media/1.0.0")
+)
+
+// Channel capacities. Each frame is one 20ms Opus packet, so 16 frames
+// = ~320ms of buffered audio — enough to absorb a short stall, small
+// enough to avoid noticeable lag when the receiver catches up.
+const (
+	mediaSendCap = 16
+	mediaRecvCap = 16
+)
+
+// maxMediaFrameSize bounds a single framed media payload. RTP/Opus
+// 20ms voice fits comfortably in a few hundred bytes; 1500 leaves
+// headroom for richer codecs without permitting absurd allocations.
+const maxMediaFrameSize = 1500
+
+// ErrDatagramsUnavailable is returned by waitForDatagramConn when no
+// QUIC connection appears within the deadline. The transport itself
+// no longer surfaces this error — it falls back to the reliable media
+// stream — but the constant is retained for callers that want the
+// underlying signal (tests, diagnostics).
 var ErrDatagramsUnavailable = errors.New("connection has no datagram support")
 
-// ControlMessage is a JSON-encoded control message sent over the reliable
-// audio-control stream. Both mute-state changes and stats snapshots share
-// this envelope.
+// ErrMediaBackpressure is returned by SendMedia when the send buffer
+// is full. Real-time audio: drop is better than block.
+var ErrMediaBackpressure = errors.New("media send buffer full")
+
+// ErrTransportClosed is returned by RecvMedia when Close has been called.
+var ErrTransportClosed = errors.New("transport closed")
+
+// ControlMessage is a JSON-encoded control message sent over the
+// reliable audio-control stream. Both mute-state changes and stats
+// snapshots share this envelope.
 type ControlMessage struct {
 	Type  string `json:"type"`
 	Value bool   `json:"value,omitempty"`
 	Stats *Stats `json:"stats,omitempty"`
 }
 
-// Transport is the per-call audio transport. It provides:
-//   - unreliable, low-latency QUIC datagrams for audio media frames
-//   - a reliable libp2p stream for control messages (mute, stats)
+// Transport is the per-call audio transport.
+//
+// Media (SendMedia/RecvMedia) automatically picks the best available
+// path: QUIC datagrams when a direct connection exists, libp2p
+// reliable stream otherwise. Callers don't have to care which.
+//
+// Control (SendControl/Control) is always reliable and ordered.
 type Transport interface {
-	// SendDatagram sends b as a QUIC datagram. Unreliable, low-latency.
-	SendDatagram(b []byte) error
-	// RecvDatagram blocks until a datagram arrives or ctx expires.
-	RecvDatagram(ctx context.Context) ([]byte, error)
+	// SendMedia enqueues a frame for transmission. Non-blocking;
+	// returns ErrMediaBackpressure if the send buffer is full
+	// (frame dropped).
+	SendMedia(b []byte) error
+	// RecvMedia blocks until a frame arrives, ctx expires, or the
+	// transport closes.
+	RecvMedia(ctx context.Context) ([]byte, error)
+	// MediaMode reports the current send-side path: "datagram" when
+	// frames are going over QUIC, "stream" when they're going over
+	// the reliable libp2p stream, "none" when neither is ready.
+	MediaMode() string
+
 	// SendControl encodes msg as JSON and writes it to the control stream.
 	SendControl(msg ControlMessage) error
 	// Control returns a read-only channel that delivers inbound control messages.
 	Control() <-chan ControlMessage
-	// Close shuts down both the datagram path and the control stream.
+
+	// Close shuts down all paths and goroutines. Idempotent.
 	Close() error
 }
 
-// datagramConn is the subset of *quic.Conn we use for audio media.
+// datagramConn is the subset of *quic.Conn we use for media frames.
 type datagramConn interface {
 	SendDatagram([]byte) error
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
-// streamRegistry maps (host → (remotePeer → channel)) for inbound control
-// streams. RegisterStreamHandler installs a SetStreamHandler that deposits
-// accepted network.Streams into this registry; readControlLoop drains from
-// it to get the peer's stream as our read side.
+// streamRegistry: (host → protocol → peer → channel of inbound streams).
+// RegisterStreamHandler installs a SetStreamHandler per protocol that
+// deposits accepted streams here; the matching wait loop in
+// libp2pTransport drains the channel.
 var (
 	regMu    sync.Mutex
-	registry = map[host.Host]map[peer.ID]chan network.Stream{}
+	registry = map[host.Host]map[protocol.ID]map[peer.ID]chan network.Stream{}
 )
 
-// RegisterStreamHandler installs the /opencom/audio-control/1.0.0 stream
-// handler on h. It must be called once per host (daemon startup, test setup)
-// before any NewLibp2pTransport call that expects to receive control messages.
+// RegisterStreamHandler installs handlers for both audio-control and
+// audio-media protocols on h. Call once per host at daemon startup
+// (and in test setup) before any NewLibp2pTransport call expects to
+// receive inbound traffic.
 //
-// The handler buffers at most 8 pending inbound streams per remote peer.
+// The handlers buffer at most 8 pending inbound streams per (proto,
+// remote peer) pair.
 func RegisterStreamHandler(h host.Host) {
-	regMu.Lock()
-	if _, ok := registry[h]; !ok {
-		registry[h] = make(map[peer.ID]chan network.Stream)
-	}
-	regMu.Unlock()
+	registerProto(h, AudioControlProtocol)
+	registerProto(h, AudioMediaProtocol)
+}
 
-	h.SetStreamHandler(AudioControlProtocol, func(s network.Stream) {
+func registerProto(h host.Host, p protocol.ID) {
+	h.SetStreamHandler(p, func(s network.Stream) {
 		remote := s.Conn().RemotePeer()
-		ch := inboundChan(h, remote)
-		ch <- s // blocks only if channel full (capacity 8); practically instant
+		ch := inboundChan(h, p, remote)
+		ch <- s // blocks only if channel full (cap 8); practically instant
 	})
 }
 
-// inboundChan returns (creating if necessary) the buffered channel for
-// inbound control streams from remote to host h.
-func inboundChan(h host.Host, remote peer.ID) chan network.Stream {
+// inboundChan returns (creating if needed) the buffered channel for
+// inbound streams of protocol p from remote, on host h.
+func inboundChan(h host.Host, p protocol.ID, remote peer.ID) chan network.Stream {
 	regMu.Lock()
 	defer regMu.Unlock()
-	peers, ok := registry[h]
+	byProto, ok := registry[h]
 	if !ok {
-		peers = make(map[peer.ID]chan network.Stream)
-		registry[h] = peers
+		byProto = make(map[protocol.ID]map[peer.ID]chan network.Stream)
+		registry[h] = byProto
 	}
-	ch, ok := peers[remote]
+	byPeer, ok := byProto[p]
+	if !ok {
+		byPeer = make(map[peer.ID]chan network.Stream)
+		byProto[p] = byPeer
+	}
+	ch, ok := byPeer[remote]
 	if !ok {
 		ch = make(chan network.Stream, 8)
-		peers[remote] = ch
+		byPeer[remote] = ch
 	}
 	return ch
 }
 
 // libp2pTransport implements Transport.
 type libp2pTransport struct {
-	dconn   datagramConn  // underlying QUIC connection for datagrams
-	outCtrl network.Stream // our outgoing control stream (write side)
-	outEnc  *json.Encoder  // JSON encoder on outCtrl
-	outMu   sync.Mutex     // serialises SendControl writes
+	h host.Host
+	p peer.ID
 
-	controlCh chan ControlMessage // inbound control messages, closed on Close
+	// Control plane: dual reliable streams (each side opens its own
+	// outgoing). controlCh is closed exactly once when the inbound
+	// reader exits or Close fires.
+	outCtrl    network.Stream
+	outCtrlEnc *json.Encoder
+	outCtrlMu  sync.Mutex
+	controlCh  chan ControlMessage
+	controlChClosed sync.Once
+
+	// Media plane: shared bounded queues drained by Pipeline.
+	sendCh chan []byte
+	recvCh chan []byte
+
+	// Datagram fast-path overlay. Populated lazily by datagramWatcher
+	// once findDatagramConn returns success.
+	dconnMu sync.RWMutex
+	dconn   datagramConn
+
+	// Reliable media stream (always opened). The outbound is our
+	// write side; an inbound stream from the peer drives the recv
+	// pump on the other side.
+	outMedia    network.Stream
+	outMediaMu  sync.Mutex
+
+	// Lifecycle.
 	closeOnce sync.Once
 	closeCtx  context.Context
 	closeFn   context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 // NewLibp2pTransport creates a Transport to peer p using host h.
 //
 // Prerequisites:
-//  1. h must have at least one QUIC v1 connection to p (for datagrams),
-//     or be able to obtain one via DCUtR within WaitForDatagramConnTimeout.
-//  2. RegisterStreamHandler must have been called on h so inbound control
-//     streams from p are delivered to the per-peer channel.
+//  1. h has at least one usable libp2p connection to p (direct or
+//     relayed). Direct QUIC enables the datagram fast-path; relay-only
+//     still works via the reliable media stream.
+//  2. RegisterStreamHandler has been called on h so inbound control
+//     and media streams are routed into the per-protocol channels.
 //
-// NewLibp2pTransport opens its own outgoing control stream to p (write side)
-// and starts a goroutine that waits for p's reciprocal stream (read side) to
-// appear in h's inbound channel. Both sides open their stream concurrently so
-// there is no deadlock when the caller calls NewLibp2pTransport for A then B.
-//
-// Returns ErrDatagramsUnavailable if no QUIC connection appears within
-// WaitForDatagramConnTimeout (typical when peers are behind symmetric NATs
-// that DCUtR can't hole-punch through).
+// Returns immediately after opening the outgoing control + media
+// streams. The datagram fast-path is attached asynchronously by
+// datagramWatcher (tight poll for WaitForDatagramConnTimeout, then
+// slow watch for the lifetime of the transport so DCUtR success
+// late-in-the-call still upgrades us).
 func NewLibp2pTransport(ctx context.Context, h host.Host, p peer.ID) (Transport, error) {
-	// 1. Find a QUIC datagram-capable connection. This blocks up to
-	//    WaitForDatagramConnTimeout to give DCUtR a chance to upgrade
-	//    a relay-only connection to direct QUIC.
-	dconn, err := waitForDatagramConn(ctx, h, p, WaitForDatagramConnTimeout)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Open our outgoing control stream to p (write side).
-	// Allow opening over a libp2p "limited" (relay-v2) connection.
-	// Without this opt-in, libp2p's swarm refuses to open streams on
-	// relayed connections and waits for DCUtR to upgrade them, which
-	// often deadlocks the audio-session setup behind the call control
-	// plane. Datagrams still go over the direct QUIC connection that
-	// findDatagramConn picked above, regardless of this flag.
-	streamCtx := network.WithAllowLimitedConn(ctx, "opencom-audio-control")
-	outStream, err := h.NewStream(streamCtx, p, AudioControlProtocol)
-	if err != nil {
-		return nil, fmt.Errorf("opening audio-control stream to %s: %w", p, err)
-	}
-
 	closeCtx, closeFn := context.WithCancel(context.Background())
 	t := &libp2pTransport{
-		dconn:     dconn,
-		outCtrl:   outStream,
-		outEnc:    json.NewEncoder(outStream),
+		h:         h,
+		p:         p,
 		controlCh: make(chan ControlMessage, 32),
+		sendCh:    make(chan []byte, mediaSendCap),
+		recvCh:    make(chan []byte, mediaRecvCap),
 		closeCtx:  closeCtx,
 		closeFn:   closeFn,
 	}
 
-	// 3. Start the read side in a goroutine: wait for p's inbound stream,
-	//    then pump messages into controlCh. This avoids blocking the caller
-	//    (and therefore avoids a deadlock when both sides create transports
-	//    sequentially in a test).
-	inCh := inboundChan(h, p)
-	go t.waitAndReadControlLoop(inCh)
+	// 1. Open outgoing control stream. Allow over a libp2p limited
+	//    (relay-v2) connection — the JSON control plane is small and
+	//    survives circuit-relay just fine.
+	ctrlCtx := network.WithAllowLimitedConn(ctx, "opencom-audio-control")
+	outCtrl, err := h.NewStream(ctrlCtx, p, AudioControlProtocol)
+	if err != nil {
+		closeFn()
+		return nil, fmt.Errorf("opening audio-control stream to %s: %w", p, err)
+	}
+	t.outCtrl = outCtrl
+	t.outCtrlEnc = json.NewEncoder(outCtrl)
+
+	// 2. Open outgoing media stream (always). Datagram fast-path
+	//    attaches alongside; this stream stays as the always-on
+	//    fallback so a mid-call DCUtR regression doesn't drop audio.
+	mediaCtx := network.WithAllowLimitedConn(ctx, "opencom-audio-media")
+	outMedia, err := h.NewStream(mediaCtx, p, AudioMediaProtocol)
+	if err != nil {
+		_ = outCtrl.Close()
+		closeFn()
+		return nil, fmt.Errorf("opening audio-media stream to %s: %w", p, err)
+	}
+	t.outMedia = outMedia
+
+	// 3. Pumps + waiters.
+	t.wg.Add(4)
+	go t.sendPump()
+	go t.waitAndReadControlLoop(inboundChan(h, AudioControlProtocol, p))
+	go t.waitAndReadMediaLoop(inboundChan(h, AudioMediaProtocol, p))
+	go t.datagramWatcher()
 
 	return t, nil
 }
 
-// waitForDatagramConn polls findDatagramConn until either a direct QUIC
-// connection appears, ctx is cancelled, or timeout elapses. The poll
-// interval (datagramPollInterval) is short enough that DCUtR success is
-// noticed promptly; libp2p does not currently expose a "datagram-capable
-// connection added" event, so polling is the most portable signal.
-//
-// Returns the underlying datagram connection on success, ctx.Err() if
-// the caller's context is cancelled, or ErrDatagramsUnavailable on
-// timeout.
-func waitForDatagramConn(ctx context.Context, h host.Host, p peer.ID, timeout time.Duration) (datagramConn, error) {
-	if dconn, err := findDatagramConn(h, p); err == nil {
-		return dconn, nil
+// SendMedia implements Transport.
+func (t *libp2pTransport) SendMedia(b []byte) error {
+	cp := append([]byte(nil), b...)
+	select {
+	case t.sendCh <- cp:
+		return nil
+	default:
+		return ErrMediaBackpressure
 	}
-	deadline := time.Now().Add(timeout)
-	tick := time.NewTicker(datagramPollInterval)
-	defer tick.Stop()
+}
+
+// RecvMedia implements Transport.
+func (t *libp2pTransport) RecvMedia(ctx context.Context) ([]byte, error) {
+	select {
+	case b := <-t.recvCh:
+		return b, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-t.closeCtx.Done():
+		return nil, ErrTransportClosed
+	}
+}
+
+// MediaMode implements Transport.
+func (t *libp2pTransport) MediaMode() string {
+	t.dconnMu.RLock()
+	dc := t.dconn
+	t.dconnMu.RUnlock()
+	if dc != nil {
+		return "datagram"
+	}
+	t.outMediaMu.Lock()
+	s := t.outMedia
+	t.outMediaMu.Unlock()
+	if s != nil {
+		return "stream"
+	}
+	return "none"
+}
+
+// SendControl implements Transport.
+func (t *libp2pTransport) SendControl(msg ControlMessage) error {
+	t.outCtrlMu.Lock()
+	defer t.outCtrlMu.Unlock()
+	return t.outCtrlEnc.Encode(msg)
+}
+
+// Control implements Transport.
+func (t *libp2pTransport) Control() <-chan ControlMessage {
+	return t.controlCh
+}
+
+// Close implements Transport. Idempotent.
+func (t *libp2pTransport) Close() error {
+	var firstErr error
+	t.closeOnce.Do(func() {
+		t.closeFn() // unblocks pumps that select on closeCtx
+		// Close outbound streams to wake up pumps and signal peer.
+		if t.outCtrl != nil {
+			if err := t.outCtrl.Close(); err != nil {
+				firstErr = err
+			}
+		}
+		if t.outMedia != nil {
+			if err := t.outMedia.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	})
+	return firstErr
+}
+
+// sendPump pulls frames from sendCh and routes them to the best
+// available path. Per-frame check of t.dconn means a mid-call DCUtR
+// success upgrades the next frame with no plumbing required.
+func (t *libp2pTransport) sendPump() {
+	defer t.wg.Done()
 	for {
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-tick.C:
-			if dconn, err := findDatagramConn(h, p); err == nil {
-				return dconn, nil
+		case <-t.closeCtx.Done():
+			return
+		case b := <-t.sendCh:
+			t.dconnMu.RLock()
+			dc := t.dconn
+			t.dconnMu.RUnlock()
+			if dc != nil {
+				_ = dc.SendDatagram(b)
+				continue
 			}
-			if time.Now().After(deadline) {
-				return nil, ErrDatagramsUnavailable
+			t.outMediaMu.Lock()
+			s := t.outMedia
+			t.outMediaMu.Unlock()
+			if s != nil {
+				_ = writeFramedMedia(s, b)
 			}
 		}
 	}
 }
 
-// findDatagramConn iterates the live connections to p and returns the first
-// one that exposes the QUIC datagram interface via network.Conn.As.
+// recvPumpDatagram drains datagrams into recvCh. Started once when a
+// direct QUIC connection becomes available.
+func (t *libp2pTransport) recvPumpDatagram(dc datagramConn) {
+	defer t.wg.Done()
+	for {
+		b, err := dc.ReceiveDatagram(t.closeCtx)
+		if err != nil {
+			return
+		}
+		t.deliverRecv(b)
+	}
+}
+
+// recvPumpStream reads length-framed media from the peer's inbound
+// media stream and forwards into recvCh.
+func (t *libp2pTransport) recvPumpStream(s network.Stream) {
+	defer t.wg.Done()
+	defer func() { _ = s.Close() }()
+	r := bufio.NewReader(s)
+	for {
+		b, err := readFramedMedia(r)
+		if err != nil {
+			return
+		}
+		t.deliverRecv(b)
+	}
+}
+
+// deliverRecv pushes b into recvCh, evicting the oldest queued frame
+// if the channel is full. Real-time audio: a fresh frame is more
+// useful than a stale one.
+func (t *libp2pTransport) deliverRecv(b []byte) {
+	select {
+	case t.recvCh <- b:
+		return
+	default:
+	}
+	// Channel full — pop oldest, then push new (best effort).
+	select {
+	case <-t.recvCh:
+	default:
+	}
+	select {
+	case t.recvCh <- b:
+	default:
+	}
+}
+
+// datagramWatcher attaches the datagram fast-path as soon as a direct
+// QUIC connection exists. Two phases:
+//
+//	1. Tight poll for WaitForDatagramConnTimeout — catches the common
+//	   case of DCUtR succeeding during call setup.
+//	2. Slow poll (dcutrWatchInterval) for the lifetime of the
+//	   transport — catches DCUtR succeeding mid-call (NAT mappings
+//	   shift, hole-punching retries succeed).
+//
+// Once a datagram path attaches, the watcher exits.
+func (t *libp2pTransport) datagramWatcher() {
+	defer t.wg.Done()
+	if t.tryAttachDatagram() {
+		return
+	}
+	tightDeadline := time.Now().Add(WaitForDatagramConnTimeout)
+	for time.Now().Before(tightDeadline) {
+		select {
+		case <-t.closeCtx.Done():
+			return
+		case <-time.After(datagramPollInterval):
+			if t.tryAttachDatagram() {
+				return
+			}
+		}
+	}
+	tick := time.NewTicker(dcutrWatchInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.closeCtx.Done():
+			return
+		case <-tick.C:
+			if t.tryAttachDatagram() {
+				return
+			}
+		}
+	}
+}
+
+// tryAttachDatagram looks for a direct QUIC connection and, if one
+// exists and we haven't already attached, atomically attaches it and
+// starts the matching recv pump. Returns true if a path is now (or
+// already was) attached.
+func (t *libp2pTransport) tryAttachDatagram() bool {
+	dc, err := findDatagramConn(t.h, t.p)
+	if err != nil {
+		return false
+	}
+	t.dconnMu.Lock()
+	if t.dconn != nil {
+		t.dconnMu.Unlock()
+		return true
+	}
+	t.dconn = dc
+	t.dconnMu.Unlock()
+	t.wg.Add(1)
+	go t.recvPumpDatagram(dc)
+	return true
+}
+
+// findDatagramConn returns the first live QUIC connection to p that
+// exposes a datagram interface, or ErrDatagramsUnavailable if none.
 func findDatagramConn(h host.Host, p peer.ID) (datagramConn, error) {
 	for _, c := range h.Network().ConnsToPeer(p) {
 		var qc *quic.Conn
@@ -256,64 +514,28 @@ func findDatagramConn(h host.Host, p peer.ID) (datagramConn, error) {
 	return nil, ErrDatagramsUnavailable
 }
 
-// SendDatagram implements Transport.
-func (t *libp2pTransport) SendDatagram(b []byte) error {
-	return t.dconn.SendDatagram(b)
-}
-
-// RecvDatagram implements Transport.
-func (t *libp2pTransport) RecvDatagram(ctx context.Context) ([]byte, error) {
-	return t.dconn.ReceiveDatagram(ctx)
-}
-
-// SendControl implements Transport.
-func (t *libp2pTransport) SendControl(msg ControlMessage) error {
-	t.outMu.Lock()
-	defer t.outMu.Unlock()
-	return t.outEnc.Encode(msg)
-}
-
-// Control implements Transport.
-func (t *libp2pTransport) Control() <-chan ControlMessage {
-	return t.controlCh
-}
-
-// Close implements Transport.
-func (t *libp2pTransport) Close() error {
-	var firstErr error
-	t.closeOnce.Do(func() {
-		t.closeFn() // signals waitAndReadControlLoop to stop
-		if err := t.outCtrl.Close(); err != nil {
-			firstErr = err
-		}
-	})
-	return firstErr
-}
-
-// waitAndReadControlLoop waits for the peer's inbound control stream to arrive
-// in inCh, then reads JSON ControlMessages from it until the stream closes or
-// the transport is closed.
+// waitAndReadControlLoop blocks until the peer's outgoing control
+// stream is delivered to inCh, then reads JSON control messages from
+// it until the stream errors or the transport closes.
 func (t *libp2pTransport) waitAndReadControlLoop(inCh <-chan network.Stream) {
-	// Wait for the peer's outgoing stream (our read side).
+	defer t.wg.Done()
 	var inStream network.Stream
 	select {
 	case inStream = <-inCh:
 	case <-t.closeCtx.Done():
-		close(t.controlCh)
+		t.controlChClosed.Do(func() { close(t.controlCh) })
 		return
 	}
 
-	defer func() {
+	// Force-close the inbound stream when the transport closes so the
+	// scanner unblocks (Scan doesn't honour ctx).
+	go func() {
+		<-t.closeCtx.Done()
 		_ = inStream.Close()
-		// Close controlCh only once; avoid double-close if Close() was called.
-		select {
-		case <-t.closeCtx.Done():
-			// Transport was closed; channel may already be draining.
-		default:
-		}
-		// Safe to close here: only this goroutine writes to/closes controlCh.
-		close(t.controlCh)
 	}()
+
+	defer t.controlChClosed.Do(func() { close(t.controlCh) })
+	defer func() { _ = inStream.Close() }()
 
 	scanner := bufio.NewScanner(inStream)
 	scanner.Buffer(make([]byte, 0, 4*1024), 1<<20)
@@ -328,4 +550,60 @@ func (t *libp2pTransport) waitAndReadControlLoop(inCh <-chan network.Stream) {
 			return
 		}
 	}
+}
+
+// waitAndReadMediaLoop blocks until the peer's outgoing media stream
+// is delivered to inCh, then hands it to recvPumpStream.
+func (t *libp2pTransport) waitAndReadMediaLoop(inCh <-chan network.Stream) {
+	defer t.wg.Done()
+	var inStream network.Stream
+	select {
+	case inStream = <-inCh:
+	case <-t.closeCtx.Done():
+		return
+	}
+
+	// Force-close on transport shutdown so ReadFull unblocks.
+	go func() {
+		<-t.closeCtx.Done()
+		_ = inStream.Close()
+	}()
+
+	t.wg.Add(1)
+	t.recvPumpStream(inStream)
+}
+
+// writeFramedMedia writes a length-prefixed media frame.
+//   layout: uint16 big-endian length || payload
+func writeFramedMedia(w io.Writer, b []byte) error {
+	if len(b) > maxMediaFrameSize {
+		return fmt.Errorf("media frame too large: %d > %d", len(b), maxMediaFrameSize)
+	}
+	var hdr [2]byte
+	binary.BigEndian.PutUint16(hdr[:], uint16(len(b)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(b)
+	return err
+}
+
+// readFramedMedia reads one length-prefixed frame from r.
+func readFramedMedia(r io.Reader) ([]byte, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint16(hdr[:])
+	if n == 0 {
+		return nil, nil
+	}
+	if n > maxMediaFrameSize {
+		return nil, fmt.Errorf("media frame too large: %d > %d", n, maxMediaFrameSize)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }

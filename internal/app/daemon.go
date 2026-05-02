@@ -288,9 +288,13 @@ func Run(ctx context.Context, opts Options) error {
 		go audioMgr.Start(ctx)
 		defer audioMgr.Stop()
 
-		host.HostInternal().SetStreamHandler(audio.AudioControlProtocol,
-			audioMgr.HandleControlStream)
+		// Register stream handlers for both audio protocols
+		// (control + media) on this host. Inbound streams are routed
+		// via audio's per-(host, proto, peer) registry to whichever
+		// libp2pTransport is waiting for them.
+		audio.RegisterStreamHandler(host.HostInternal())
 		defer host.HostInternal().RemoveStreamHandler(audio.AudioControlProtocol)
+		defer host.HostInternal().RemoveStreamHandler(audio.AudioMediaProtocol)
 	}
 
 	// Build nil-safe interface values for audio-dependent IPC handlers.

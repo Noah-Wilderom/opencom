@@ -290,7 +290,7 @@ func newCallListCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "CALL ID\tSTATE\tDIRECTION\tREMOTE\tMUTE\tAUDIO\tRX-LVL\tTX-LVL")
+			fmt.Fprintln(tw, "CALL ID\tSTATE\tDIRECTION\tREMOTE\tMUTE\tAUDIO\tMEDIA\tRX-LVL\tTX-LVL")
 			for _, c := range res.Calls {
 				mute := "no"
 				if c.Muted {
@@ -302,6 +302,10 @@ func newCallListCmd() *cobra.Command {
 				if audioStatus == "" {
 					audioStatus = "-"
 				}
+				media := c.MediaMode
+				if media == "" {
+					media = "-"
+				}
 				rx := "-∞"
 				if c.RxLevelDB > -100 {
 					rx = fmt.Sprintf("%d dB", c.RxLevelDB)
@@ -310,8 +314,8 @@ func newCallListCmd() *cobra.Command {
 				if c.TxLevelDB > -100 {
 					tx = fmt.Sprintf("%d dB", c.TxLevelDB)
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					c.CallID, c.State, c.Direction, c.Remote, mute, audioStatus, rx, tx)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					c.CallID, c.State, c.Direction, c.Remote, mute, audioStatus, media, rx, tx)
 			}
 			return tw.Flush()
 		},

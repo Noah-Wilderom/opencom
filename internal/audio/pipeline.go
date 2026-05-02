@@ -129,7 +129,7 @@ func (p *Pipeline) onCapture(pcm []int16) {
 		p.cfg.Stats.ObserveTxDropped()
 		return
 	}
-	if err := p.cfg.Transport.SendDatagram(bytes); err != nil {
+	if err := p.cfg.Transport.SendMedia(bytes); err != nil {
 		p.cfg.Stats.ObserveTxDropped()
 		return
 	}
@@ -138,7 +138,7 @@ func (p *Pipeline) onCapture(pcm []int16) {
 
 func (p *Pipeline) recvLoop(ctx context.Context) {
 	for {
-		dg, err := p.cfg.Transport.RecvDatagram(ctx)
+		dg, err := p.cfg.Transport.RecvMedia(ctx)
 		if err != nil {
 			return
 		}

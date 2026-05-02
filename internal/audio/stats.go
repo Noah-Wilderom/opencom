@@ -19,6 +19,11 @@ type Stats struct {
 	EncoderBitrate int
 	Muted          bool
 	PeerMuted      bool
+	// MediaMode reports which transport path media frames are
+	// currently using: "datagram" (direct QUIC, low latency),
+	// "stream" (libp2p reliable stream over relay or otherwise,
+	// higher latency), or "none" (no path attached yet).
+	MediaMode string
 }
 
 // statsCore is the live counter set updated from pipeline goroutines.
@@ -36,6 +41,7 @@ type statsCore struct {
 	bitrate        int
 	muted          bool
 	peerMuted      bool
+	mediaMode      string
 }
 
 // NewStatsCore returns a fresh statsCore. One per Session.
@@ -99,6 +105,14 @@ func (s *statsCore) SetPeerMuted(b bool) {
 	s.mu.Unlock()
 }
 
+// SetMediaMode records the transport's current media path. Called
+// periodically from the session's stats ticker.
+func (s *statsCore) SetMediaMode(mode string) {
+	s.mu.Lock()
+	s.mediaMode = mode
+	s.mu.Unlock()
+}
+
 // Snapshot returns a stable Stats copy. Resets the rolling peaks so
 // the next interval's peaks reflect that interval, not lifetime maxes.
 func (s *statsCore) Snapshot() Stats {
@@ -115,6 +129,7 @@ func (s *statsCore) Snapshot() Stats {
 		EncoderBitrate: s.bitrate,
 		Muted:          s.muted,
 		PeerMuted:      s.peerMuted,
+		MediaMode:      s.mediaMode,
 	}
 	// Roll peaks so subsequent snapshots reflect new audio, not history.
 	s.txPeak = -100

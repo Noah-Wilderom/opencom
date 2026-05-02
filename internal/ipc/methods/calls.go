@@ -54,6 +54,10 @@ type CallsListEntry struct {
 	AudioOK   string `json:"audio_ok,omitempty"` // "ok" | "no-mic" | "no-output" | "unavailable" | ""
 	RxLevelDB int    `json:"rx_level_db,omitempty"`
 	TxLevelDB int    `json:"tx_level_db,omitempty"`
+	// MediaMode is the transport path media is currently using:
+	// "datagram" (direct QUIC) or "stream" (relayed reliable). Empty
+	// when no audio session has constructed yet.
+	MediaMode string `json:"media_mode,omitempty"`
 }
 
 // CallsListResult is the calls.list response shape.
@@ -151,6 +155,7 @@ func CallsList(mgr *call.Manager, audioStatter AudioStatter) ipc.Handler {
 					entry.AudioOK = "ok"
 					entry.RxLevelDB = stats.RxPeakDBFS
 					entry.TxLevelDB = stats.TxPeakDBFS
+					entry.MediaMode = stats.MediaMode
 				}
 			}
 			out.Calls = append(out.Calls, entry)

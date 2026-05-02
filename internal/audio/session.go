@@ -149,7 +149,10 @@ func (s *Session) Close() {
 }
 
 // statsTicker emits per-second stats over the control stream so the
-// peer's CallsListEntry reflects what we're observing locally.
+// peer's CallsListEntry reflects what we're observing locally. Also
+// refreshes the local MediaMode in stats so the local CLI's call list
+// reports the current path (datagram vs. stream) without relying on
+// the peer's emission.
 func (s *Session) statsTicker(ctx context.Context) {
 	tk := time.NewTicker(time.Second)
 	defer tk.Stop()
@@ -158,6 +161,7 @@ func (s *Session) statsTicker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
+			s.stats.SetMediaMode(s.transport.MediaMode())
 			snap := s.stats.Snapshot()
 			_ = s.transport.SendControl(ControlMessage{Type: "stats", Stats: &snap})
 		}
